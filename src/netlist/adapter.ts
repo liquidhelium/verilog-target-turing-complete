@@ -499,11 +499,26 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
       const regInst = instantiate(regTemplate, regId);
       components.push(regInst);
       
+      // Value (Inputs)
       regInst.connections["value"] = muxOut;
       registerSink(nets, muxOut, {componentId: regId, portId: "value"});
       
+      // Save (Write Enable / Clock)
       regInst.connections["save"] = clkWire;
       registerSink(nets, clkWire, {componentId: regId, portId: "save"});
+      
+      // Load (Read Enable / Output Enable) -> Tie to 1 (Always enabled for Verilog behavior)
+      const loadConstId = `${instanceId}_load_const`;
+      const loadInst = instantiate(getTemplate("CONST_1"), loadConstId);
+      // loadInst is ON by default if using CONST_1 template? 
+      // CONST_1 is "On" component.
+      components.push(loadInst);
+      const loadWire = `${loadConstId}_out`;
+      loadInst.connections["out"] = loadWire;
+      registerSource(nets, loadWire, {componentId: loadConstId, portId: "out"});
+      
+      regInst.connections["load"] = loadWire;
+      registerSink(nets, loadWire, {componentId: regId, portId: "load"});
       
       const regOut = `${instanceId}_reg_out`;
       regInst.connections["out"] = regOut;

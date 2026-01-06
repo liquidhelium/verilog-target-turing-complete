@@ -324,9 +324,10 @@ SIZES.forEach((size) => {
     // @ts-ignore
     REGISTERS[size],
     [
-      { id: "value", direction: "in", position: { x: -1, y: 0 } },
-      { id: "save", direction: "in", position: { x: 0, y: -1 } }, // Assuming Top Load
-      { id: "out", direction: "out", position: { x: 1, y: 0 } },
+      { id: "load", direction: "in", position: { x: -1, y: -1 } }, // Read/Enable Output (1 bit)
+      { id: "save", direction: "in", position: { x: -1, y: 0 } },  // Write/Clock (1 bit)
+      { id: "value", direction: "in", position: { x: -1, y: 1 } }, // Data In (N bits)
+      { id: "out", direction: "out", position: { x: 1, y: 0 } },   // Data Out (N bits)
     ]
   ));
 });
