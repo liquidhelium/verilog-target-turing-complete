@@ -1,0 +1,27 @@
+{
+  "name": "verilog-to-tc",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "verilog2tc": "./dist/cli.js"
+  },
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@yowasp/yosys": "^0.45.6",
+    "elkjs": "^0.9.3",
+    "snappy": "^7.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.1.0"
+  }
+}
