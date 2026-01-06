@@ -102,20 +102,68 @@ module demux2(input wire d, input wire sel, output wire y0, output wire y1);
 endmodule
 `,
   },
+  {
+    name: "11_bus_and_8",
+    top: "bus_and_8",
+    verilog: `
+module bus_and_8(input wire [7:0] a, input wire [7:0] b, output wire [7:0] y);
+  assign y = a & b;
+endmodule
+`,
+  },
+  {
+    name: "12_bus_and_32",
+    top: "bus_and_32",
+    verilog: `
+module bus_and_32(input wire [31:0] a, input wire [31:0] b, output wire [31:0] y);
+  assign y = a & b;
+endmodule
+`,
+  },
+  {
+    name: "13_bus_odd_31",
+    top: "bus_odd_31",
+    verilog: `
+module bus_odd_31(input wire [30:0] a, input wire [30:0] b, output wire [30:0] y);
+  assign y = a & b;
+endmodule
+`,
+  },
+  {
+    name: "14_bus_mux_8",
+    top: "bus_mux_8",
+    verilog: `
+module bus_mux_8(input wire [7:0] a, input wire [7:0] b, input wire s, output wire [7:0] y);
+  assign y = s ? b : a;
+endmodule
+`,
+  },
 ];
 
 async function main() {
+  const filter = process.argv[2];
+  let targets = BENCHMARKS;
+  if (filter) {
+      if (filter === 'new') {
+          targets = BENCHMARKS.filter(b => parseInt(b.name.substring(0,2)) >= 11);
+      } else if (filter === 'old') {
+          targets = BENCHMARKS.filter(b => parseInt(b.name.substring(0,2)) <= 10);
+      } else {
+          targets = BENCHMARKS.filter(b => b.name.includes(filter));
+      }
+  }
+
   const outputBase = resolve("test_output");
   
   // Clean output directory
   try {
-    await fs.rm(outputBase, { recursive: true, force: true });
+    if (!filter) await fs.rm(outputBase, { recursive: true, force: true });
   } catch (e) {}
   await fs.mkdir(outputBase, { recursive: true });
 
-  console.log(`Generating ${BENCHMARKS.length} benchmarks...`);
+  console.log(`Generating ${targets.length} benchmarks...`);
 
-  for (const bench of BENCHMARKS) {
+  for (const bench of targets) {
     const folder = join(outputBase, bench.name);
     await fs.mkdir(folder, { recursive: true });
     
