@@ -323,61 +323,39 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
   let compCounter = 0;
   const idGen = { next: () => `gen_c${compCounter++}` };
 
-  // Module ports
+  // 1. Process Module Input Ports (Drivers)
   for (const [portName, port] of Object.entries(module.ports ?? {})) {
-    const isInput = port.direction === "input";
-    const isOutput = port.direction === "output";    
-    if (!isInput && !isOutput) continue;
+    if (port.direction !== "input") continue;
 
     const width = port.bits.length;
-    // For ports, user wants optimized bus representation?
-    // A 32-bit input port in Yosys should map to Input32?
-    // Yosys ports are collections of bits.
-    // To support multi-bit logic, we'd need to emit Input32 and then Splitter32 to provide the bits?
-    // Yes.
-    
-    // Logic:
-    // If width > 1, use bus port + splitter/maker.
-    
     const size = resolveSize(width);
     if (size === 1) {
        // Old logic for 1-bit
        const bit = port.bits[0];
        const bitInfo = normalizeBit(bit, counter);
-       const componentId = `${isInput ? "in" : "out"}:${portName}`;
-       const instance = instantiate(isInput ? INPUT_1 : OUTPUT_1, componentId);
+       const componentId = `in:${portName}`;
+       const instance = instantiate(INPUT_1, componentId);
        instance.metadata = { label: portName, modulePort: { portName, bitIndex: 0 } };
        components.push(instance);
-       instance.connections[isInput ? "out" : "in"] = bitInfo.id;
-       if(isInput) registerSource(nets, bitInfo.id, {componentId, portId: "out"});
-       else registerSink(nets, bitInfo.id, {componentId, portId: "in"});
-       
+       instance.connections["out"] = bitInfo.id;
+       registerSource(nets, bitInfo.id, {componentId, portId: "out"});
     } else {
        // Multi-bit
-       const componentId = `${isInput ? "in" : "out"}:${portName}`;
-       const tplId = isInput ? `INPUT_${size}` : `OUTPUT_${size}`;
+       const componentId = `in:${portName}`;
+       const tplId = `INPUT_${size}`;
        const instance = instantiate(getTemplate(tplId), componentId);
        instance.metadata = { label: portName };
        components.push(instance);
-       
        const bits = port.bits.map(b => normalizeBit(b, counter));
-       
-       if (isInput) {
-           // Input component produces a bus. Unpack it to the bits.
-           const busId = `${componentId}_bus`;
-           instance.connections["out"] = busId;
-           registerSource(nets, busId, {componentId, portId: "out"});
-           unpackBits(busId, bits, size, components, nets, idGen);
-       } else {
-           // Output component consumes a bus. Pack bits.
-           const busId = packBits(bits, size, components, nets, idGen);
-           instance.connections["in"] = busId;
-           registerSink(nets, busId, {componentId, portId: "in"});
-       }
+       // Input component produces a bus. Unpack it to the bits.
+       const busId = `${componentId}_bus`;
+       instance.connections["out"] = busId;
+       registerSource(nets, busId, {componentId, portId: "out"});
+       unpackBits(busId, bits, size, components, nets, idGen);
     }
   }
 
-  // Cells
+  // 2. Process Cells (Logic)
   for (const [cellName, cell] of Object.entries(module.cells ?? {})) {
     const binding = CELL_LIBRARY[cell.type];
     if (!binding) {
@@ -556,6 +534,37 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
         registerSource(nets, busOut, {componentId: instanceId, portId: binding.outputPort});
         
         unpackBits(busOut, outBits, size, components, nets, idGen);
+    }
+  }
+
+  // 3. Process Module Output Ports (Consumers)
+  for (const [portName, port] of Object.entries(module.ports ?? {})) {
+    if (port.direction !== "output") continue;
+
+    const width = port.bits.length;
+    const size = resolveSize(width);
+    const componentId = `out:${portName}`;
+    
+    if (size === 1) {
+       const bit = port.bits[0];
+       const bitInfo = normalizeBit(bit, counter);
+       const instance = instantiate(OUTPUT_1, componentId);
+       instance.metadata = { label: portName, modulePort: { portName, bitIndex: 0 } };
+       components.push(instance);
+       instance.connections["in"] = bitInfo.id;
+       registerSink(nets, bitInfo.id, {componentId: componentId, portId: "in"});
+    } else {
+       const tplId = `OUTPUT_${size}`;
+       const instance = instantiate(getTemplate(tplId), componentId);
+       instance.metadata = { label: portName };
+       components.push(instance);
+       
+       const bits = port.bits.map(b => normalizeBit(b, counter));
+       // Output component consumes a bus. Pack bits.
+       // NOTE: This runs AFTER cells, so packBits can verify if bits come from a Splitter driven by a cell.
+       const busId = packBits(bits, size, components, nets, idGen);
+       instance.connections["in"] = busId;
+       registerSink(nets, busId, {componentId: componentId, portId: "in"});
     }
   }
 
