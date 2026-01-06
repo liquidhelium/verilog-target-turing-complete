@@ -182,10 +182,14 @@ const SIZES = [8, 16, 32, 64];
 function makePorts(
   inputs: string[],
   output: string | null,
-  size: number
+  size: number,
+  outputX: number = 2
 ): ComponentPort[] {
   const ports: ComponentPort[] = [];
+  // Reverted input spacing change per user instruction "input is correct"
+  // y logic: n=2 -> 0. Ports at 0, -1.
   let y = Math.floor((inputs.length - 1) / 2);
+
   inputs.forEach((id, i) => {
     ports.push({
       id,
@@ -194,7 +198,7 @@ function makePorts(
     });
   });
   if (output) {
-    ports.push({ id: output, direction: "out", position: { x: 2, y: 0 } });
+    ports.push({ id: output, direction: "out", position: { x: outputX, y: 0 } });
   }
   return ports;
 }
@@ -211,23 +215,17 @@ const GATES = {
 
 SIZES.forEach((size) => {
   // @ts-ignore
-  register(template(`AND_${size}`, `And${size}`, GATES.AND[size], makePorts(["A", "B"], "Y", size)));
+  register(template(`AND_${size}`, `And${size}`, GATES.AND[size], makePorts(["A", "B"], "Y", size, 1)));
   // @ts-ignore
-  register(template(`OR_${size}`, `Or${size}`, GATES.OR[size], makePorts(["A", "B"], "Y", size)));
+  register(template(`OR_${size}`, `Or${size}`, GATES.OR[size], makePorts(["A", "B"], "Y", size, 1)));
   // @ts-ignore
-  register(template(`XOR_${size}`, `Xor${size}`, GATES.XOR[size], makePorts(["A", "B"], "Y", size)));
+  register(template(`XOR_${size}`, `Xor${size}`, GATES.XOR[size], makePorts(["A", "B"], "Y", size, 1)));
   // @ts-ignore
-  register(template(`XNOR_${size}`, `Xnor${size}`, GATES.XNOR[size], makePorts(["A", "B"], "Y", size)));
+  register(template(`XNOR_${size}`, `Xnor${size}`, GATES.XNOR[size], makePorts(["A", "B"], "Y", size, 1)));
   // @ts-ignore
-  register(template(`NOT_${size}`, `Not${size}`, GATES.NOT[size], makePorts(["A"], "Y", size)));
-  
-  // Mux ports: A (0), B (1), S (Select). In TC Mux, top is input 0, bottom input 1? Or other way?
-  // Usually Mux has Data inputs and Control. We'll verify ports later.
-  // Assuming A, B, S. S is the control. 
-  // TC Mux commonly has 3 input pins on left? No, usually Control is on side or bottom.
-  // Let's assume standard layout for now: A, B, S.
+  register(template(`NOT_${size}`, `Not${size}`, GATES.NOT[size], makePorts(["A"], "Y", size, 1)));
   // @ts-ignore
-  register(template(`MUX_${size}`, `Mux${size}`, GATES.MUX[size], makePorts(["A", "B", "S"], "Y", size)));
+  register(template(`MUX_${size}`, `Mux${size}`, GATES.MUX[size], makePorts(["A", "B", "S"], "Y", size, 1)));
 });
 
 // IO
