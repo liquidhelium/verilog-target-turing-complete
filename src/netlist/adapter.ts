@@ -265,6 +265,51 @@ function resolveSize(width: number): 1 | 8 | 16 | 32 | 64 {
   throw new Error(`Unsupported width ${width} (max 64)`);
 }
 
+// Remove splitters/makers that have been fully optimized away (unused outputs)
+function cleanupRedundantComponents(components: ComponentInstance[], nets: Map<NetBitId, NetBit>): ComponentInstance[] {
+    const toRemove = new Set<string>();
+
+    for (const comp of components) {
+        if (comp.template.id.startsWith("SPLITTER_")) {
+            // Check if any OUT port is used
+            let used = false;
+            for (const [portId, netId] of Object.entries(comp.connections)) {
+                if (portId.startsWith("out")) {
+                    const net = nets.get(netId as string);
+                    if (net && net.sinks.length > 0) {
+                        used = true;
+                        break;
+                    }
+                }
+            }
+            if (!used) {
+                toRemove.add(comp.id);
+                // Remove the splitter from the sinks of the input net
+                const inNetId = comp.connections["in"];
+                if (typeof inNetId === 'string') {
+                    const inNet = nets.get(inNetId);
+                    if (inNet) {
+                        inNet.sinks = inNet.sinks.filter(s => s.componentId !== comp.id);
+                    }
+                }
+                // (Optional) Remove sources for out nets?
+                // The out nets are unused, so it doesn't matter much for ELK if no sinks exist.
+                // But for cleanliness:
+                for (const [portId, netId] of Object.entries(comp.connections)) {
+                    if (portId.startsWith("out")) {
+                        const outNet = nets.get(netId as string);
+                        if (outNet && outNet.source?.componentId === comp.id) {
+                            outNet.source = undefined;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return components.filter(c => !toRemove.has(c.id));
+}
+
 export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOptions): NetlistGraph {
   const counter = { zero: 0, one: 0 };
   const parsed: YosysJson = typeof json === "string" ? JSON.parse(json) : (json as YosysJson);
@@ -273,7 +318,7 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
     throw new Error(`Top module ${options.topModule} not found in Yosys output`);
   }
 
-  const components: ComponentInstance[] = [];
+  let components: ComponentInstance[] = []; // Changed to let for filtering
   const nets: Map<NetBitId, NetBit> = new Map();
   let compCounter = 0;
   const idGen = { next: () => `gen_c${compCounter++}` };
@@ -513,6 +558,9 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
         unpackBits(busOut, outBits, size, components, nets, idGen);
     }
   }
+
+  // Remove redundant splitters/makers
+  components = cleanupRedundantComponents(components, nets);
 
   // Verify nets all have driver
   for (const [netId, net] of nets) {
