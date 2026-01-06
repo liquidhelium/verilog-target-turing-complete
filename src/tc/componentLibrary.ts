@@ -265,7 +265,10 @@ SIZES.forEach((size) => {
   const makerPorts: ComponentPort[] = [];
   for (let i = 0; i < size; i++) {
     // Stagger inputs vertically
-    makerPorts.push({ id: `in${i}`, direction: "in", position: { x: -1, y: Math.floor(size / 2) - i } });
+    // User requested LSB (0) at Top.
+    // i=0 -> Top (Negative Y). i=size-1 -> Bottom (Positive Y).
+    // Centering: (size-1)/2. For 8: 3.5. i=0->-3.5 ~ -3. i=7->3.5 ~ 4.
+    makerPorts.push({ id: `in${i}`, direction: "in", position: { x: -1, y: i - Math.floor((size - 1) / 2) } });
   }
   makerPorts.push({ id: "out", direction: "out", position: { x: 1, y: 0 } });
   register(template(`MAKER_${size}`, `Maker${size}`, makerKind, makerPorts));
@@ -276,7 +279,8 @@ SIZES.forEach((size) => {
   const splitterPorts: ComponentPort[] = [];
   splitterPorts.push({ id: "in", direction: "in", position: { x: -1, y: 0 } });
   for (let i = 0; i < size; i++) {
-    splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: Math.floor(size / 2) - i } });
+     // User requested LSB (0) at Top.
+    splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((size - 1) / 2) } });
   }
   register(template(`SPLITTER_${size}`, `Splitter${size}`, splitterKind, splitterPorts));
 });
