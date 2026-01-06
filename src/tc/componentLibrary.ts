@@ -71,7 +71,7 @@ export const INPUT_1 = register(
     [
       { id: "out", direction: "out", position: { x: 1, y: 0 } },
     ],
-    { minX: 0, maxX: 2, minY: -1, maxY: 1 },
+    { minX: 0, maxX: 2, minY: 0, maxY: 0 },
   ),
 );
 
@@ -83,7 +83,7 @@ export const OUTPUT_1 = register(
     [
       { id: "in", direction: "in", position: { x: -1, y: 0 } },
     ],
-    { minX: -2, maxX: 0, minY: -1, maxY: 1 },
+    { minX: -2, maxX: 0, minY: 0, maxY: 0 },
   ),
 );
 
@@ -95,7 +95,7 @@ export const CONST_0 = register(
     [
       { id: "out", direction: "out", position: { x: 1, y: 0 } },
     ],
-    { minX: 0, maxX: 2, minY: -1, maxY: 1 },
+    { minX: 0, maxX: 2, minY: 0, maxY: 0 },
   ),
 );
 
@@ -107,7 +107,7 @@ export const CONST_1 = register(
     [
       { id: "out", direction: "out", position: { x: 1, y: 0 } },
     ],
-    { minX: 0, maxX: 2, minY: -1, maxY: 1 },
+    { minX: 0, maxX: 2, minY: 0, maxY: 0 },
   ),
 );
 
