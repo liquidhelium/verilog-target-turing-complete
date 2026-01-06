@@ -240,8 +240,34 @@ function findPortPosition(
   };
 }
 
-function wiresFromLayout(layout: LayoutResult, netlist: NetlistGraph): { start: TCPoint; body: number[] }[] {
-  const result: { start: TCPoint; body: number[]; end?: TCPoint }[] = [];
+function getPortWidth(component: ComponentInstance, portId: string): number {
+  const match = component.template.id.match(/_(\d+)$/);
+  if (!match) return 1;
+  const size = parseInt(match[1], 10);
+  
+  if (component.template.id.startsWith("SPLITTER_")) {
+    // Splitter outputs are single bits
+    return 1;
+  }
+  
+  // Maker: outputs are Bus (size)
+  // Gates/IO: outputs are Bus (size)
+  return size;
+}
+
+function widthToWireKind(width: number): WireKind {
+  switch (width) {
+    case 1: return WireKind.Wk1;
+    case 8: return WireKind.Wk8;
+    case 16: return WireKind.Wk16;
+    case 32: return WireKind.Wk32;
+    case 64: return WireKind.Wk64;
+    default: return WireKind.Wk1;
+  }
+}
+
+function wiresFromLayout(layout: LayoutResult, netlist: NetlistGraph): { start: TCPoint; body: number[]; kind: WireKind }[] {
+  const result: { start: TCPoint; body: number[]; end?: TCPoint; kind: WireKind }[] = [];
   for (const edge of layout.edges) {
     const info = decodeEdgeId(edge.id);
     const sourceComponent = findComponent(netlist, info.sourceComponent);
@@ -268,8 +294,11 @@ function wiresFromLayout(layout: LayoutResult, netlist: NetlistGraph): { start: 
       points[points.length - 1] = targetEnd;
     }
 
+    const width = getPortWidth(sourceComponent, sourcePort.id);
+    const kind = widthToWireKind(width);
+
     const body = encodeWire(points);
-    result.push({ start: sourceStart, body });
+    result.push({ start: sourceStart, body, kind });
   }
   return result;
 }
@@ -278,7 +307,7 @@ function createPayload(layout: LayoutResult, netlist: NetlistGraph, description?
   const components = toTcComponents(layout, netlist);
   const wiresData = wiresFromLayout(layout, netlist);
   const wires = wiresData.map((wireData) => ({
-    kind: WireKind.Wk1,
+    kind: wireData.kind,
     color: WireColor.Default,
     comment: "",
     path: {
