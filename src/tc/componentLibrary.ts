@@ -316,6 +316,19 @@ const COMPS = {
   LESSI: { 8: ComponentKind.LessI8, 16: ComponentKind.LessI16, 32: ComponentKind.LessI32, 64: ComponentKind.LessI64 },
 };
 
+// Explicit EQUAL_1 alias to XNOR_1
+register(template(
+  "EQUAL_1",
+  "Equal1",
+  ComponentKind.Xnor, // Use basic XNOR gate matching A==B logic?
+  // XNOR A,B -> Y. (A==B)
+  [
+    { id: "A", direction: "in", position: { x: -1, y: 1 } },
+    { id: "B", direction: "in", position: { x: -1, y: -1 } },
+    { id: "out", direction: "out", position: { x: 2, y: 0 } }, // Rename Y to out
+  ]
+));
+
 SIZES.forEach((size) => {
   // Equal
   // @ts-ignore
@@ -392,6 +405,10 @@ SIZES.forEach((size) => {
   ]));
   */
 });
+
+// Comparisons
+// Removed duplicate COMPS declaration and array that caused TS Error
+
 
 export type TemplateId = keyof typeof templates;
 
