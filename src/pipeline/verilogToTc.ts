@@ -19,12 +19,17 @@ export interface VerilogSources {
 export interface ConvertOptions {
   topModule: string;
   description?: string;
+  debug?: boolean;
 }
 
 export interface ConvertResult {
   payload: TCSavePayload;
   saveFile: Uint8Array;
   uncompressed: Uint8Array;
+  debugInfo?: {
+      layoutJson: any;
+      yosysJson: any;
+  };
 }
 
 const DIRECTIONS: TCPoint[] = [
@@ -301,7 +306,12 @@ export async function convertVerilogToSave(
   const payload = createPayload(layout, netlist, options.description);
   const writer = new TCSaveWriter(payload);
   const { saveFile, uncompressed } = await writer.build();
-  return { payload, saveFile, uncompressed };
+  return { 
+      payload, 
+      saveFile, 
+      uncompressed,
+      debugInfo: options.debug ? { layoutJson: layout, yosysJson } : undefined
+  };
 }
 
 export async function convertFilesToSave(
