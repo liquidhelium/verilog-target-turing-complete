@@ -270,13 +270,22 @@ SIZES.forEach((size) => {
   // @ts-ignore
   const makerKind = SPLITMAKERS.MAKER[size];
   const makerPorts: ComponentPort[] = [];
-  for (let i = 0; i < size; i++) {
-    // Stagger inputs vertically
-    // User requested LSB (0) at Top.
-    // i=0 -> Top (Negative Y). i=size-1 -> Bottom (Positive Y).
-    // Centering: (size-1)/2. For 8: 3.5. i=0->-3.5 ~ -3. i=7->3.5 ~ 4.
-    makerPorts.push({ id: `in${i}`, direction: "in", position: { x: -1, y: i - Math.floor((size - 1) / 2) } });
+  
+  if (size === 8) {
+      for (let i = 0; i < size; i++) {
+        makerPorts.push({ id: `in${i}`, direction: "in", position: { x: -1, y: i - Math.floor((size - 1) / 2) } });
+      }
+  } else {
+      // For 16, 32, 64: Split into 8-bit chunks.
+      const chunks = size / 8;
+      // Fix: 16-bit maker needs adjustment (y-1) because logic implies it.
+      // Actually user asked for "Calculation result - 1" for 16-bit maker.
+      const adj = size === 16 ? -1 : 0;
+      for (let i = 0; i < chunks; i++) {
+          makerPorts.push({ id: `in${i}`, direction: "in", position: { x: -1, y: i - Math.floor((chunks - 1) / 2) + adj } });
+      }
   }
+  
   makerPorts.push({ id: "out", direction: "out", position: { x: 1, y: 0 } });
   register(template(`MAKER_${size}`, `Maker${size}`, makerKind, makerPorts));
 
@@ -285,10 +294,18 @@ SIZES.forEach((size) => {
   const splitterKind = SPLITMAKERS.SPLITTER[size];
   const splitterPorts: ComponentPort[] = [];
   splitterPorts.push({ id: "in", direction: "in", position: { x: -1, y: 0 } });
-  for (let i = 0; i < size; i++) {
-     // User requested LSB (0) at Top.
-    splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((size - 1) / 2) } });
+  
+  if (size === 8) {
+      for (let i = 0; i < size; i++) {
+        splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((size - 1) / 2) } });
+      }
+  } else {
+      const chunks = size / 8;
+      for (let i = 0; i < chunks; i++) {
+        splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((chunks - 1) / 2) } });
+      }
   }
+
   register(template(`SPLITTER_${size}`, `Splitter${size}`, splitterKind, splitterPorts));
 });
 
@@ -316,7 +333,21 @@ const REGISTERS = {
   8: ComponentKind.Register8, 16: ComponentKind.Register16, 32: ComponentKind.Register32, 64: ComponentKind.Register64,
 };
 
+// Bit Register (Size 1)
+register(template(
+  "REG_1",
+  "Reg1",
+  ComponentKind.BitMemory,
+  [
+     { id: "save", direction: "in", position: { x: -1, y: -1 } }, // Top: Enable Write
+     // Middle (y=0) is empty
+     { id: "value", direction: "in", position: { x: -1, y: 1 } }, // Bottom: Value
+     { id: "out", direction: "out", position: { x: 1, y: 0 } },    // Output
+  ]
+));
+
 SIZES.forEach((size) => {
+  const x = size === 8 ? 1 : 2;
   // @ts-ignore
   register(template(
     `REG_${size}`,
@@ -324,12 +355,42 @@ SIZES.forEach((size) => {
     // @ts-ignore
     REGISTERS[size],
     [
-      { id: "load", direction: "in", position: { x: -1, y: -1 } }, // Read/Enable Output (1 bit)
-      { id: "save", direction: "in", position: { x: -1, y: 0 } },  // Write/Clock (1 bit)
-      { id: "value", direction: "in", position: { x: -1, y: 1 } }, // Data In (N bits)
-      { id: "out", direction: "out", position: { x: 1, y: 0 } },   // Data Out (N bits)
+      { id: "load", direction: "in", position: { x: -x, y: -1 } }, // Read/Enable Output (1 bit)
+      { id: "save", direction: "in", position: { x: -x, y: 0 } },  // Write/Clock (1 bit)
+      { id: "value", direction: "in", position: { x: -x, y: 1 } }, // Data In (N bits)
+      { id: "out", direction: "out", position: { x: x, y: 0 } },   // Data Out (N bits)
     ]
   ));
+});
+
+// Math
+const MATH = {
+  ADD: { 8: ComponentKind.Add8, 16: ComponentKind.Add16, 32: ComponentKind.Add32, 64: ComponentKind.Add64 },
+  MUL: { 8: ComponentKind.Mul8, 16: ComponentKind.Mul16, 32: ComponentKind.Mul32, 64: ComponentKind.Mul64 },
+  SHL: { 8: ComponentKind.Shl8, 16: ComponentKind.Shl16, 32: ComponentKind.Shl32, 64: ComponentKind.Shl64 },
+  SHR: { 8: ComponentKind.Shr8, 16: ComponentKind.Shr16, 32: ComponentKind.Shr32, 64: ComponentKind.Shr64 },
+  NEG: { 8: ComponentKind.Neg8, 16: ComponentKind.Neg16, 32: ComponentKind.Neg32, 64: ComponentKind.Neg64 },
+  DIVMOD: { 8: ComponentKind.DivMod8, 16: ComponentKind.DivMod16, 32: ComponentKind.DivMod32, 64: ComponentKind.DivMod64 },
+};
+
+SIZES.forEach((size) => {
+  // @ts-ignore
+  register(template(`ADD_${size}`, `Add${size}`, MATH.ADD[size], makePorts(["A", "B"], "sum", size, 1)));
+  // @ts-ignore
+  register(template(`MUL_${size}`, `Mul${size}`, MATH.MUL[size], makePorts(["A", "B"], "pro", size, 1)));
+  // @ts-ignore
+  register(template(`SHL_${size}`, `Shl${size}`, MATH.SHL[size], makePorts(["A", "shift"], "out", size, 1)));
+  // @ts-ignore
+  register(template(`SHR_${size}`, `Shr${size}`, MATH.SHR[size], makePorts(["A", "shift"], "out", size, 1)));
+  // @ts-ignore
+  register(template(`NEG_${size}`, `Neg${size}`, MATH.NEG[size], makePorts(["A"], "out", size, 1)));
+  // DivMod has 2 outputs.
+  /*
+  // @ts-ignore
+  register(template(`DIVMOD_${size}`, `DivMod${size}`, MATH.DIVMOD[size], [
+       // ... inputs A, B. outputs Div, Mod
+  ]));
+  */
 });
 
 export type TemplateId = keyof typeof templates;

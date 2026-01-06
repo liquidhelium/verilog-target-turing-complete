@@ -51,6 +51,18 @@ const GATES_XOR: SizeMap = { 1: "XOR_1", 8: "XOR_8", 16: "XOR_16", 32: "XOR_32",
 const GATES_XNOR: SizeMap = { 1: "XNOR_1", 8: "XNOR_8", 16: "XNOR_16", 32: "XNOR_32", 64: "XNOR_64" };
 const GATES_NOT: SizeMap = { 1: "NOT_1", 8: "NOT_8", 16: "NOT_16", 32: "NOT_32", 64: "NOT_64" };
 
+// Math helpers
+const MATH_ADD: SizeMap = { 8: "ADD_8", 16: "ADD_16", 32: "ADD_32", 64: "ADD_64" };
+const MATH_MUL: SizeMap = { 8: "MUL_8", 16: "MUL_16", 32: "MUL_32", 64: "MUL_64" };
+const MATH_SHL: SizeMap = { 8: "SHL_8", 16: "SHL_16", 32: "SHL_32", 64: "SHL_64" };
+const MATH_SHR: SizeMap = { 8: "SHR_8", 16: "SHR_16", 32: "SHR_32", 64: "SHR_64" };
+const MATH_NEG: SizeMap = { 8: "NEG_8", 16: "NEG_16", 32: "NEG_32", 64: "NEG_64" };
+// DivMod is special? TC has one component. Yosys has $div and $mod.
+// We can support them by mapping to DIVMOD_x and only connecting one output.
+// But `adapter` assumes `outputPort` is a string.
+// I'll need to extend adapter to support `outputPort` mapping logic or manual handling.
+// For now, let's implement basic ADD/MUL/SHL/SHR/NEG.
+
 const CELL_LIBRARY: Record<string, TemplateBinding> = {
   "$and": { template: GATES_AND, inputPorts: ["A", "B"], outputPort: "Y" },
   "$_AND_": { template: AND_1, inputPorts: ["A", "B"], outputPort: "Y" },
@@ -64,6 +76,32 @@ const CELL_LIBRARY: Record<string, TemplateBinding> = {
   "$_NOT_": { template: NOT_1, inputPorts: ["A"], outputPort: "Y" },
   "$mux": { template: "INTERNAL_MUX", inputPorts: ["A", "B", "S"], outputPort: "Y" },
   "$_MUX_": { template: "INTERNAL_MUX", inputPorts: ["A", "B", "S"], outputPort: "Y" },
+  
+  // Math
+  "$add": { template: MATH_ADD, inputPorts: ["A", "B"], outputPort: "sum" },
+  "$sub": { template: MATH_ADD, inputPorts: ["A", "B"], outputPort: "sum" }, // Wait, SUB is ADD with Negated B? Yosys usually outputs $sub.
+  // TC doesn't have explicit SUB component?
+  // User asked for "Math".
+  // Let's check if TC has SUB.
+  // The componentLibrary didn't list SUB in MATH group.
+  // It has NEG. So SUB = ADD(A, NEG(B))? Or ADD(A, NOT(B)) + 1?
+  // Yosys might emit $sub. If TC doesn't have SUB, I need to implement decomposition or mapping.
+  // Checking `types.ts` ... there is no `Sub8` etc. There is `Neg8`.
+  // So $sub should be handled manually in the loop like $sdff or mapped to a sequence.
+  
+  "$mul": { template: MATH_MUL, inputPorts: ["A", "B"], outputPort: "pro" }, // TC output is "pro" (product)? I used "pro" in makePorts call.
+  "$shl": { template: MATH_SHL, inputPorts: ["A", "B"], outputPort: "out" }, // Yosys B is shift amount. TC port "shift".
+  // Wait, I used makePorts port names ["A", "shift"].
+  // But Yosys uses "A", "B".
+  // I must map Yosys "B" to TC "shift".
+  // The binding `inputPorts` is Yosys keys? No, it's used to iterate Yosys keys AND map to TC ports in strict order?
+  // Current logic: `for (const inputPort of binding.inputPorts)`
+  // `ensureArray(cell.connections[inputPort])` -> Reads Yosys port.
+  // `instance.connections[inputPort] = busId` -> Connects to TC port of SAME NAME.
+  // IF names differ (Yosys "B" vs TC "shift"), I cannot use this generic logic.
+  // I need manual handling for SHL/SHR/SUB.
+  
+  "$neg": { template: MATH_NEG, inputPorts: ["A"], outputPort: "out" },
 };
 
 const CONST_ZERO_ID = "__const0";
@@ -129,6 +167,8 @@ function ensureDriverIfConstant(
   nets: Map<NetBitId, NetBit>
 ) {
   if (bitInfo.constant !== undefined) {
+    if (nets.get(bitInfo.id)?.source) return;
+
     const constId = `${destinationId}:${portName}:const`;
     const constTemplate = bitInfo.constant === 0 ? CONST_0 : CONST_1;
     const constInstance = instantiate(constTemplate, constId);
@@ -159,6 +199,11 @@ function packBits(
   nets: Map<NetBitId, NetBit>,
   idGen: { next: () => string }
 ): NetBitId {
+  // If size is 1, just return the single bit (no maker needed)
+  if (targetSize === 1 && bits.length >= 1) {
+      return bits[0].id;
+  }
+  
   // 1. Check if these bits come from a Splitter of compatible size/alignment
   // We check the driver of the first bit.
   const firstDriver = nets.get(bits[0].id)?.source;
@@ -169,25 +214,24 @@ function packBits(
       const splitterSize = parseInt(driverComp.template.id.split("_")[1]);
       // Only optimize if sizes match (or logic allows masking). For simplicity, exact match.
       if (splitterSize === targetSize && bits.length <= targetSize) {
-        let allMatch = true;
-        for (let i = 0; i < bits.length; i++) {
-          const d = nets.get(bits[i].id)?.source;
-          if (
-            !d ||
-            d.componentId !== firstDriver.componentId ||
-            d.portId !== `out${i}`
-          ) {
-            allMatch = false;
-            break;
-          }
-        }
-        // If matched inputs correspond to splitter outputs 0..N, we can reuse the bus.
-        // The Splitter input is 'in'.
-        if (allMatch) {
-            // Check if rest of splitter is unused or defaults? 
-            // TC handles partial. If we need 32 bits, and we take 32 bits from splitter, we just use the bus entering the splitter.
-            const busNetId = driverComp.connections["in"];
-            if (busNetId) return busNetId;
+        // Only optimize if splitter outputs 1-bit pins (size <= 8)
+        if (targetSize <= 8) {
+            let allMatch = true;
+            for (let i = 0; i < bits.length; i++) {
+              const d = nets.get(bits[i].id)?.source;
+              if (
+                !d ||
+                d.componentId !== firstDriver.componentId ||
+                d.portId !== `out${i}`
+              ) {
+                allMatch = false;
+                break;
+              }
+            }
+            if (allMatch) {
+                const busNetId = driverComp.connections["in"];
+                if (busNetId) return busNetId;
+            }
         }
       }
     }
@@ -206,20 +250,12 @@ function packBits(
       }
   }
   
-  // NOTE: Only optimize if FULL width is provided (or we are okay with padding 0s).
-  // bits might be shorter than targetSize (padding 0s).
-  // If bits are constant, padding 0 is just more constants.
   if (allConst && bits.length <= targetSize) {
-      // Create Big Constant
       const constId = idGen.next();
       const constTpl = `CONST_${targetSize}`;
       const instance = instantiate(getTemplate(constTpl), constId);
-      // We need to set the value. Constant components use 'setting1' or 'customString'? 
-      // Typically 'setting1' holds the value for Constants.
-      instance.metadata = { 
-          label: `0x${constValue.toString(16).toUpperCase()}`,
-          setting1: constValue 
-      };
+      if (!instance.metadata) instance.metadata = {};
+      instance.metadata.setting1 = constValue;
       
       components.push(instance);
       const busId = `${constId}_val`;
@@ -228,7 +264,36 @@ function packBits(
       return busId;
   }
 
-  // 2. If not optimizable, create a Maker
+  // 2. Hierarchical Maker for > 8
+  if (targetSize > 8) {
+      const makerId = idGen.next();
+      const makerTemplateId = `MAKER_${targetSize}`;
+      const maker = instantiate(getTemplate(makerTemplateId), makerId);
+      components.push(maker);
+      
+      const chunks = targetSize / 8;
+      for (let i = 0; i < chunks; i++) {
+          const chunkBits = [];
+          for(let j=0; j<8; j++) {
+             const bitIndex = i * 8 + j;
+             if (bitIndex < bits.length) {
+                 chunkBits.push(bits[bitIndex]);
+             } else {
+                 chunkBits.push(normalizeBit("0", { zero:0, one:0 }));
+             }
+          }
+          const subBus = packBits(chunkBits, 8, components, nets, idGen);
+          maker.connections[`in${i}`] = subBus;
+          registerSink(nets, subBus, { componentId: makerId, portId: `in${i}` });
+      }
+
+      const busId = `${makerId}_bus`;
+      maker.connections["out"] = busId;
+      registerSource(nets, busId, { componentId: makerId, portId: "out" });
+      return busId;
+  }
+
+  // 3. Standard Maker (<= 8)
   const makerId = idGen.next();
   const makerTemplateId = `MAKER_${targetSize}`;
   const makerDesc = getTemplate(makerTemplateId);
@@ -242,10 +307,6 @@ function packBits(
       bitId = bits[i].id;
       ensureDriverIfConstant(bits[i], makerId, `in${i}`, components, nets);
     } else {
-      // Pad with 0
-      // We need a constant 0.
-      // Use normalizeBit logic to get a 0.
-      // Reuse logic? Just create a const 0.
       bitId = `__pad_0_${makerId}_${i}`;
       const constId = `${makerId}:pad:${i}`;
       const constInst = instantiate(CONST_0, constId);
@@ -274,7 +335,44 @@ function unpackBits(
     nets: Map<NetBitId, NetBit>,
     idGen: { next: () => string }
 ): void {
-    // Create Splitter
+    if (targetSize === 1 && targetBits.length === 1) {
+         const source = nets.get(busId)?.source;
+         if (source) {
+             if (targetBits[0].constant !== undefined) {
+                 // Ignore constant target
+                 return; 
+             }
+             registerSource(nets, targetBits[0].id, source);
+         }
+         return;
+    }
+
+    if (targetSize > 8) {
+       // Hierarchical Splitter
+       const splitterId = idGen.next();
+       const splitterTemplateId = `SPLITTER_${targetSize}`;
+       const splitter = instantiate(getTemplate(splitterTemplateId), splitterId);
+       components.push(splitter);
+       
+       splitter.connections["in"] = busId;
+       registerSink(nets, busId, { componentId: splitterId, portId: "in" });
+       
+       const chunks = targetSize / 8;
+       for(let i=0; i<chunks; i++) {
+           const subBusId = `${splitterId}_out${i}`;
+           splitter.connections[`out${i}`] = subBusId;
+           registerSource(nets, subBusId, { componentId: splitterId, portId: `out${i}` });
+           
+           const start = i*8;
+           const end = Math.min((i+1)*8, targetBits.length);
+           if (start < targetBits.length) {
+                unpackBits(subBusId, targetBits.slice(start, end), 8, components, nets, idGen);
+           }
+       }
+       return;
+    }
+
+    // Standard Splitter (<= 8)
     const splitterId = idGen.next();
     const splitterTemplateId = `SPLITTER_${targetSize}`;
     const splitter = instantiate(getTemplate(splitterTemplateId), splitterId);
@@ -293,15 +391,10 @@ function unpackBits(
              throw new Error("Cannot assign to constant");
         }
         
-        // Wire splitter out[i] to bit.id
-        // NOTE: If bit.id already has a driver?
-        // normalizeBit returns unique IDs for constants, but here Yosys is defining the net name for a Cell Output.
-        // It should be undriven.
-        
-        splitter.connections[`out${i}`] = bit.id;
-        registerSource(nets, bit.id, { componentId: splitterId, portId: `out${i}` });
+        const bitId = bit.id;
+        splitter.connections[`out${i}`] = bitId;
+        registerSource(nets, bitId, { componentId: splitterId, portId: `out${i}` });
     }
-    // Remaining splitter outputs are unconnected.
 }
 
 function resolveSize(width: number): 1 | 8 | 16 | 32 | 64 {
@@ -405,6 +498,72 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
 
   // 2. Process Cells (Logic)
   for (const [cellName, cell] of Object.entries(module.cells ?? {})) {
+    // Standard D-Flip-Flop ($dff)
+    if (cell.type === "$dff") {
+      const width = parseParamInt(cell.parameters?.WIDTH);
+      const size = resolveSize(width);
+      const clkPol = parseParamInt(cell.parameters?.CLK_POLARITY);
+      
+      const instanceId = cellName;
+      
+      // 1. CLK
+      let clkWire = normalizeBit(ensureArray(cell.connections["CLK"], "CLK", 1)[0], counter).id;
+      if (clkPol === 0) {
+        // Invert Clock
+        const notId = `${instanceId}_clk_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = clkWire;
+        registerSink(nets, clkWire, {componentId: notId, portId: "A"});
+        
+        const clkInv = `${instanceId}_clk_inv`;
+        notInst.connections["Y"] = clkInv;
+        registerSource(nets, clkInv, {componentId: notId, portId: "Y"});
+        clkWire = clkInv; 
+      }
+      
+      // 2. Data Inputs (D)
+      const dRaw = ensureArray(cell.connections["D"], "D");
+      const dPacked = packBits(dRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      // 3. Register
+      const regId = `${instanceId}_reg`;
+      const regTemplate = getTemplate(`REG_${size}`);
+      const regInst = instantiate(regTemplate, regId);
+      components.push(regInst);
+      
+      // Value (D)
+      regInst.connections["value"] = dPacked;
+      registerSink(nets, dPacked, {componentId: regId, portId: "value"});
+      
+      // Save (CLK)
+      regInst.connections["save"] = clkWire;
+      registerSink(nets, clkWire, {componentId: regId, portId: "save"});
+      
+      // Load (Tie to 1) - Only for registers > 1 bit
+      if (size > 1) {
+          const loadConstId = `${instanceId}_load_const`;
+          const loadInst = instantiate(getTemplate("CONST_1"), loadConstId);
+          components.push(loadInst);
+          const loadWire = `${loadConstId}_out`;
+          loadInst.connections["out"] = loadWire;
+          registerSource(nets, loadWire, {componentId: loadConstId, portId: "out"});
+          
+          regInst.connections["load"] = loadWire;
+          registerSink(nets, loadWire, {componentId: regId, portId: "load"});
+      }
+      
+      const regOut = `${instanceId}_reg_out`;
+      regInst.connections["out"] = regOut;
+      registerSource(nets, regOut, {componentId: regId, portId: "out"});
+      
+      // 4. Connect Output Q
+      const qRaw = ensureArray(cell.connections["Q"], "Q");
+      unpackBits(regOut, qRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      continue;
+    }
+
     // Special handling for Synchronous D-Flip-Flop ($sdff) usually generated for state machines
     if (cell.type === "$sdff") {
       const width = parseParamInt(cell.parameters?.WIDTH);
@@ -672,6 +831,233 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
       continue;
     }
 
+    // Math: $add
+    if (cell.type === "$add") {
+       const width = Math.max(parseParamInt(cell.parameters?.A_WIDTH), parseParamInt(cell.parameters?.B_WIDTH));
+       const size = resolveSize(width);
+       const instanceId = cellName;
+       
+       const inst = instantiate(getTemplate(`ADD_${size}`), instanceId);
+       components.push(inst);
+       
+       // Inputs
+       const aBits = ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter));
+       const bBits = ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter));
+       
+       const aPacked = packBits(aBits, size, components, nets, idGen);
+       const bPacked = packBits(bBits, size, components, nets, idGen);
+       
+       inst.connections["A"] = aPacked;
+       inst.connections["B"] = bPacked;
+       registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+       registerSink(nets, bPacked, {componentId: instanceId, portId: "B"});
+       
+       // Output
+       const yRaw = ensureArray(cell.connections["Y"], "Y");
+       const busOut = `${instanceId}_sum`;
+       inst.connections["sum"] = busOut;
+       registerSource(nets, busOut, {componentId: instanceId, portId: "sum"});
+       
+       unpackBits(busOut, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       continue;
+    }
+
+    // Math: $sub (Convert to Add(A, Neg(B)))
+    if (cell.type === "$sub") {
+       const width = Math.max(parseParamInt(cell.parameters?.A_WIDTH), parseParamInt(cell.parameters?.B_WIDTH));
+       const size = resolveSize(width);
+       const instanceId = cellName;
+       
+       // 1. Negate B
+       const negId = `${instanceId}_negB`;
+       const negInst = instantiate(getTemplate(`NEG_${size}`), negId);
+       components.push(negInst);
+       
+       const bBits = ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter));
+       const bPacked = packBits(bBits, size, components, nets, idGen);
+       
+       negInst.connections["A"] = bPacked;
+       registerSink(nets, bPacked, {componentId: negId, portId: "A"});
+       
+       const negOut = `${negId}_out`;
+       negInst.connections["out"] = negOut;
+       registerSource(nets, negOut, {componentId: negId, portId: "out"});
+       
+       // 2. Add(A, NegB)
+       const addInst = instantiate(getTemplate(`ADD_${size}`), instanceId);
+       components.push(addInst);
+       
+       const aBits = ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter));
+       const aPacked = packBits(aBits, size, components, nets, idGen);
+       
+       addInst.connections["A"] = aPacked;
+       addInst.connections["B"] = negOut;
+       registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+       registerSink(nets, negOut, {componentId: instanceId, portId: "B"});
+       
+       // Output
+       const yRaw = ensureArray(cell.connections["Y"], "Y");
+       const busOut = `${instanceId}_sum`;
+       addInst.connections["sum"] = busOut;
+       registerSource(nets, busOut, {componentId: instanceId, portId: "sum"});
+       
+       unpackBits(busOut, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       continue;
+    }
+
+    // Math: $mul
+    if (cell.type === "$mul") {
+       const width = Math.max(parseParamInt(cell.parameters?.A_WIDTH), parseParamInt(cell.parameters?.B_WIDTH));
+       const size = resolveSize(width);
+       const instanceId = cellName;
+       
+       const inst = instantiate(getTemplate(`MUL_${size}`), instanceId);
+       components.push(inst);
+       
+       const aPacked = packBits(ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       const bPacked = packBits(ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       
+       inst.connections["A"] = aPacked;
+       inst.connections["B"] = bPacked;
+       registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+       registerSink(nets, bPacked, {componentId: instanceId, portId: "B"});
+       
+       const yRaw = ensureArray(cell.connections["Y"], "Y");
+       const busOut = `${instanceId}_pro`;
+       inst.connections["pro"] = busOut;
+       registerSource(nets, busOut, {componentId: instanceId, portId: "pro"});
+       
+       unpackBits(busOut, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       continue;
+    }
+
+    // Math: $shl, $sshl, $shr, $sshr
+    if (cell.type === "$shl" || cell.type === "$sshl" || cell.type === "$shr" || cell.type === "$sshr") {
+       const width = parseParamInt(cell.parameters?.A_WIDTH);
+       const size = resolveSize(width);
+       const instanceId = cellName;
+       
+       let templateId = "";
+       // Yosys $shl and $sshl are logically left shifts. $shr is logical right, $sshr is arithmetic right.
+       // TC Shl seems to be logical left. Shr logical right. 
+       // Wait, TC usually has just Shl/Shr. If it strictly only supports one type, we map best effort.
+       // Assuming TC Shl/Shr are unsigned/logical.
+       // If $sshr (arithmetic), we might need Rol/Ror or specifically arithmetic shift components if they exist?
+       // Inspecting `types.ts`, valid components are `Shl8`, `Shr8`.
+       // I'll map Left -> SHL, Right -> SHR.
+       
+       if (cell.type.includes("shl")) templateId = `SHL_${size}`;
+       else templateId = `SHR_${size}`;
+       
+       const inst = instantiate(getTemplate(templateId), instanceId);
+       components.push(inst);
+       
+       const aPacked = packBits(ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       // Shift amount (B)
+       const bPacked = packBits(ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       
+       inst.connections["A"] = aPacked;
+       inst.connections["shift"] = bPacked; // Map Yosys B to TC shift
+       registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+       registerSink(nets, bPacked, {componentId: instanceId, portId: "shift"});
+       
+       const yRaw = ensureArray(cell.connections["Y"], "Y");
+       const busOut = `${instanceId}_out`;
+       inst.connections["out"] = busOut;
+       registerSource(nets, busOut, {componentId: instanceId, portId: "out"});
+       
+       unpackBits(busOut, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+       continue;
+    }
+    
+    // Math: $neg
+    if (cell.type === "$neg") {
+        const width = parseParamInt(cell.parameters?.A_WIDTH);
+        const size = resolveSize(width);
+        const instanceId = cellName;
+        
+        const inst = instantiate(getTemplate(`NEG_${size}`), instanceId);
+        components.push(inst);
+        
+        const aPacked = packBits(ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+        
+        inst.connections["A"] = aPacked;
+        registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+        
+        const yRaw = ensureArray(cell.connections["Y"], "Y");
+        const busOut = `${instanceId}_out`;
+        inst.connections["out"] = busOut;
+        registerSource(nets, busOut, {componentId: instanceId, portId: "out"});
+        
+        unpackBits(busOut, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+        continue;
+    }
+
+    // Comparisons: $lt, $gt, $le, $ge
+    if (["$lt", "$gt", "$le", "$ge"].includes(cell.type)) {
+       const width = Math.max(parseParamInt(cell.parameters?.A_WIDTH), parseParamInt(cell.parameters?.B_WIDTH));
+       const size = resolveSize(width);
+       const signed = parseParamInt(cell.parameters?.A_SIGNED) > 0;
+       const instanceId = cellName;
+       
+       const tmplPrefix = signed ? "LESSI" : "LESSU";
+       const tmplId = `${tmplPrefix}_${size}`;
+       
+       // Determine wiring based on type
+       // $lt: A < B -> Less(A, B)
+       // $gt: A > B -> Less(B, A)
+       // $ge: A >= B -> Not(Less(A, B))
+       // $le: A <= B -> Not(Less(B, A))
+       
+       const swap = cell.type === "$gt" || cell.type === "$le";
+       const invert = cell.type === "$ge" || cell.type === "$le";
+       
+       const inst = instantiate(getTemplate(tmplId), instanceId);
+       components.push(inst);
+       
+       const aBits = ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter));
+       const bBits = ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter));
+       
+       const aPacked = packBits(aBits, size, components, nets, idGen);
+       const bPacked = packBits(bBits, size, components, nets, idGen);
+       
+       // If swap, connect B to A port, and A to B port
+       inst.connections["A"] = swap ? bPacked : aPacked;
+       inst.connections["B"] = swap ? aPacked : bPacked;
+       
+       registerSink(nets, swap ? bPacked : aPacked, {componentId: instanceId, portId: "A"});
+       registerSink(nets, swap ? aPacked : bPacked, {componentId: instanceId, portId: "B"});
+       
+       const cmpOut = `${instanceId}_cmp_out`;
+       inst.connections["out"] = cmpOut;
+       registerSource(nets, cmpOut, {componentId: instanceId, portId: "out"});
+       
+       const yRaw = ensureArray(cell.connections["Y"], "Y");
+       
+       if (invert) {
+           // Add NOT gate
+           const notId = `${instanceId}_invert`;
+           // Since comparison output is 1 bit (usually?), we use NOT_1?
+           // TC comparators outputs might be 1 bit.
+           // Let's assume 1 bit for comparison result.
+           const notInst = instantiate(getTemplate("NOT_1"), notId);
+           components.push(notInst);
+           
+           notInst.connections["A"] = cmpOut;
+           registerSink(nets, cmpOut, {componentId: notId, portId: "A"});
+           
+           const notOut = `${notId}_out`;
+           notInst.connections["Y"] = notOut;
+           registerSource(nets, notOut, {componentId: notId, portId: "Y"});
+           
+           unpackBits(notOut, yRaw.map(b => normalizeBit(b, counter)), 1, components, nets, idGen);
+       } else {
+           // Direct connect. Comparison output is usually 1 bit.
+           unpackBits(cmpOut, yRaw.map(b => normalizeBit(b, counter)), 1, components, nets, idGen);
+       }
+       continue;
+    }
+
     const binding = CELL_LIBRARY[cell.type];
     if (!binding) {
       throw new Error(`Unsupported cell type ${cell.type}`);
@@ -702,25 +1088,77 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
           ensureDriverIfConstant(B, cellName, "B", components, nets);
           ensureDriverIfConstant(S, cellName, "S", components, nets);
           
+          // Optimize 1-bit Mux logic: Y = (A & !S) | (B & S)
+          
+          // Generate !S (Only if needed)
           const nS_wire = `$mux_nS_${cellName}`;
-          const term1_wire = `$mux_t1_${cellName}`;
-          const term2_wire = `$mux_t2_${cellName}`;
-          const notId = `${cellName}_not`; const notInst = instantiate(NOT_1, notId);
-          components.push(notInst);
-          registerSink(nets, S.id, { componentId: notId, portId: "A" });
-          registerSource(nets, nS_wire, { componentId: notId, portId: "Y" });
-          const and1Id = `${cellName}_and1`; const and1Inst = instantiate(AND_1, and1Id); components.push(and1Inst);
-          registerSink(nets, A.id, { componentId: and1Id, portId: "A" });
-          registerSink(nets, nS_wire, { componentId: and1Id, portId: "B" });
-          registerSource(nets, term1_wire, { componentId: and1Id, portId: "Y" });
-          const and2Id = `${cellName}_and2`; const and2Inst = instantiate(AND_1, and2Id); components.push(and2Inst);
-          registerSink(nets, B.id, { componentId: and2Id, portId: "A" });
-          registerSink(nets, S.id, { componentId: and2Id, portId: "B" });
-          registerSource(nets, term2_wire, { componentId: and2Id, portId: "Y" });
-          const orId = `${cellName}_or`; const orInst = instantiate(OR_1, orId); components.push(orInst);
+          let notInstCreated = false;
+          function ensureNotS() {
+              if (notInstCreated) return;
+              const notId = `${cellName}_not`; 
+              const notInst = instantiate(NOT_1, notId);
+              components.push(notInst);
+              registerSink(nets, S.id, { componentId: notId, portId: "A" });
+              registerSource(nets, nS_wire, { componentId: notId, portId: "Y" });
+              notInstCreated = true;
+          }
+
+          // Term 1: A & !S
+          let term1_wire: string;
+          if (A.constant === 0) {
+              // 0 & !S -> 0
+              term1_wire = A.id; // Correctly points to Const0 net
+          } else if (A.constant === 1) {
+              // 1 & !S -> !S
+              ensureNotS();
+              term1_wire = nS_wire;
+          } else {
+              // Basic AND
+              ensureNotS();
+              const and1Id = `${cellName}_and1`; 
+              const and1Inst = instantiate(AND_1, and1Id); 
+              components.push(and1Inst);
+              registerSink(nets, A.id, { componentId: and1Id, portId: "A" });
+              registerSink(nets, nS_wire, { componentId: and1Id, portId: "B" });
+              term1_wire = `$mux_t1_${cellName}`;
+              and1Inst.connections["Y"] = term1_wire;
+              registerSource(nets, term1_wire, { componentId: and1Id, portId: "Y" });
+          }
+
+          // Term 2: B & S
+          let term2_wire: string;
+          if (B.constant === 0) {
+              // 0 & S -> 0
+              term2_wire = B.id; // Points to Const0 net
+          } else if (B.constant === 1) {
+              // 1 & S -> S
+              term2_wire = S.id;
+          } else {
+              // Basic AND
+              const and2Id = `${cellName}_and2`; 
+              const and2Inst = instantiate(AND_1, and2Id); 
+              components.push(and2Inst);
+              registerSink(nets, B.id, { componentId: and2Id, portId: "A" });
+              registerSink(nets, S.id, { componentId: and2Id, portId: "B" });
+              term2_wire = `$mux_t2_${cellName}`;
+              and2Inst.connections["Y"] = term2_wire;
+              registerSource(nets, term2_wire, { componentId: and2Id, portId: "Y" });
+          }
+
+          // Result: Term1 | Term2
+          // Optimization: If either term is 0, just use the other (via Buffer/OR-with-0)
+          // Since we can't easily Buffer without inserting a component, using OR(0, X) IS a buffer.
+          // And standard OR logic handles it perfectly if we just feed term1_wire/term2_wire.
+          // But if BOTH are 0, OR(0,0) -> 0. Correct.
+          // If T1=0, T2=S. OR(0, S) -> S. Correct.
+          
+          const orId = `${cellName}_or`; 
+          const orInst = instantiate(OR_1, orId); 
+          components.push(orInst);
           registerSink(nets, term1_wire, { componentId: orId, portId: "A" });
           registerSink(nets, term2_wire, { componentId: orId, portId: "B" });
           registerSource(nets, Y.id, { componentId: orId, portId: "Y" });
+          
           continue;
        } else {
            // Multi-bit Mux

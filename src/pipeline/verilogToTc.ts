@@ -323,6 +323,50 @@ function createPayload(layout: LayoutResult, netlist: NetlistGraph, description?
   return payload;
 }
 
+function centerLayout(layout: LayoutResult) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  // Check Nodes
+  for (const node of layout.nodes) {
+    minX = Math.min(minX, node.position.x);
+    minY = Math.min(minY, node.position.y);
+    maxX = Math.max(maxX, node.position.x + node.width);
+    maxY = Math.max(maxY, node.position.y + node.height);
+  }
+
+  // Check Edges
+  for (const edge of layout.edges) {
+    for (const point of edge.points) {
+        minX = Math.min(minX, point.x);
+        minY = Math.min(minY, point.y);
+        maxX = Math.max(maxX, point.x);
+        maxY = Math.max(maxY, point.y);
+    }
+  }
+  
+  if (!Number.isFinite(minX)) return;
+
+  const currentCenterX = (minX + maxX) / 2;
+  const currentCenterY = (minY + maxY) / 2;
+  
+  // Round to integer to maintain grid alignment
+  const offsetX = Math.round(-currentCenterX);
+  const offsetY = Math.round(-currentCenterY);
+  
+  // Apply Offset
+  for (const node of layout.nodes) {
+      node.position.x += offsetX;
+      node.position.y += offsetY;
+  }
+  
+  for (const edge of layout.edges) {
+      for (const point of edge.points) {
+          point.x += offsetX;
+          point.y += offsetY;
+      }
+  }
+}
+
 export async function convertVerilogToSave(
   sources: VerilogSources,
   options: ConvertOptions,
@@ -332,6 +376,9 @@ export async function convertVerilogToSave(
   const layoutGraph = buildLayoutGraph(netlist);
   const router = new ElkRouter({ gridSize: GRID_SIZE });
   const layout = await router.route(layoutGraph);
+  
+  centerLayout(layout);
+
   const payload = createPayload(layout, netlist, options.description);
   const writer = new TCSaveWriter(payload);
   const { saveFile, uncompressed } = await writer.build();
