@@ -21,6 +21,7 @@ interface YosysPort {
 interface YosysCell {
   type: string;
   connections: Record<string, Array<number | string>>;
+  parameters?: Record<string, string | number>;
 }
 
 interface YosysModule {
@@ -136,6 +137,18 @@ function ensureDriverIfConstant(
     constInstance.connections["out"] = bitInfo.id;
     registerSource(nets, bitInfo.id, { componentId: constId, portId: "out" });
   }
+}
+
+function parseParamInt(val: string | number | undefined): number {
+  if (val === undefined) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') {
+     if (/^[01]+$/.test(val) && val.length > 1) {
+         return parseInt(val, 2);
+     }
+     return parseInt(val);
+  }
+  return 0;
 }
 
 // Optimization: Pack loose bits into a bus
@@ -392,6 +405,258 @@ export function buildNetlistFromYosys(json: unknown, options: YosysAdapterOption
 
   // 2. Process Cells (Logic)
   for (const [cellName, cell] of Object.entries(module.cells ?? {})) {
+    // Special handling for Synchronous D-Flip-Flop ($sdff) usually generated for state machines
+    if (cell.type === "$sdff") {
+      const width = parseParamInt(cell.parameters?.WIDTH);
+      const size = resolveSize(width);
+      const clkPol = parseParamInt(cell.parameters?.CLK_POLARITY);
+      const srstPol = parseParamInt(cell.parameters?.SRST_POLARITY);
+      const srstVal = BigInt("0b" + (cell.parameters?.SRST_VALUE as any ?? "0"));
+
+      const instanceId = cellName;
+      
+      // 1. CLK Processing
+      let clkWire = normalizeBit(ensureArray(cell.connections["CLK"], "CLK", 1)[0], counter).id;
+      if (clkPol === 0) {
+        // Invert Clock
+        const notId = `${instanceId}_clk_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = clkWire;
+        registerSink(nets, clkWire, {componentId: notId, portId: "A"});
+        
+        const clkInv = `${instanceId}_clk_inv`;
+        notInst.connections["Y"] = clkInv;
+        registerSource(nets, clkInv, {componentId: notId, portId: "Y"});
+        clkWire = clkInv; // Use inverted
+      }
+      
+      // 2. SRST Processing (Mux Select)
+      let srstWire = normalizeBit(ensureArray(cell.connections["SRST"], "SRST", 1)[0], counter).id;
+      // If SRST_POLARITY is 0, active low -> We want active high for Mux Select (1 = Reset)
+      if (srstPol === 0) {
+         // Invert SRST
+         const notId = `${instanceId}_srst_not`;
+         const notInst = instantiate(getTemplate("NOT_1"), notId);
+         components.push(notInst);
+         notInst.connections["A"] = srstWire;
+         registerSink(nets, srstWire, {componentId: notId, portId: "A"});
+         
+         const srstInv = `${instanceId}_srst_inv`;
+         notInst.connections["Y"] = srstInv;
+         registerSource(nets, srstInv, {componentId: notId, portId: "Y"});
+         srstWire = srstInv;
+      }
+      
+      // 3. Data Inputs (D) & Reset Value Converted to Bus
+      // D might be shorter than Width, or exact.
+      const dRaw = ensureArray(cell.connections["D"], "D");
+      const dPacked = packBits(dRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      // Create Constant for Reset Value
+      // We can use a CONST_N component.
+      const constId = `${instanceId}_rst_val`;
+      const constTemplate = getTemplate(`CONST_${size}`);
+      const constInst = instantiate(constTemplate, constId);
+      // We need to set the value. CONST_N uses 'setting1' usually? 
+      // No, currently we use metadata.setting1 for the SAVE format.
+      if (!constInst.metadata) constInst.metadata = {};
+      constInst.metadata.setting1 = srstVal; 
+      components.push(constInst);
+      
+      const rstBusId = `${instanceId}_rst_val_out`;
+      constInst.connections["out"] = rstBusId;
+      registerSource(nets, rstBusId, {componentId: constId, portId: "out"});
+      
+      // 4. Mux for Next State vs Reset
+      // Mux Select: 0 -> Input A, 1 -> Input B.
+      // We want: SRST=1 -> Reset Value. So Reset Value goes to Input B. D goes to Input A.
+      // Wait, Mux ports are usually A, B... Which is 0, Which is 1?
+      // TC Mux components usually specify logic. Assuming A=0, B=1.
+      // Let's verify Mux ports: "A", "B", "S". 
+      // Standard convention: S=0 -> A, S=1 -> B.
+      const muxId = `${instanceId}_rst_mux`;
+      const muxTemplate = getTemplate(`MUX_${size}`);
+      const muxInst = instantiate(muxTemplate, muxId);
+      components.push(muxInst);
+      
+      muxInst.connections["A"] = dPacked; // 0
+      registerSink(nets, dPacked, {componentId: muxId, portId: "A"});
+      
+      muxInst.connections["B"] = rstBusId; // 1
+      registerSink(nets, rstBusId, {componentId: muxId, portId: "B"});
+      
+      muxInst.connections["S"] = srstWire;
+      registerSink(nets, srstWire, {componentId: muxId, portId: "S"});  // Ensure Mux accepts mapped S (usually 1 bit)
+      
+      const muxOut = `${instanceId}_mux_out`;
+      muxInst.connections["Y"] = muxOut;
+      registerSource(nets, muxOut, {componentId: muxId, portId: "Y"});
+      
+      // 5. Register
+      const regId = `${instanceId}_reg`;
+      const regTemplate = getTemplate(`REG_${size}`);
+      const regInst = instantiate(regTemplate, regId);
+      components.push(regInst);
+      
+      regInst.connections["value"] = muxOut;
+      registerSink(nets, muxOut, {componentId: regId, portId: "value"});
+      
+      regInst.connections["save"] = clkWire;
+      registerSink(nets, clkWire, {componentId: regId, portId: "save"});
+      
+      const regOut = `${instanceId}_reg_out`;
+      regInst.connections["out"] = regOut;
+      registerSource(nets, regOut, {componentId: regId, portId: "out"});
+      
+      // 6. Connect Output Q
+      const qRaw = ensureArray(cell.connections["Q"], "Q");
+      unpackBits(regOut, qRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      continue;
+    }
+
+    // Special handling for Parallel Multiplexer ($pmux) usually generated for case statements
+    if (cell.type === "$pmux") {
+      const width = parseParamInt(cell.parameters?.WIDTH);
+      const sWidth = parseParamInt(cell.parameters?.S_WIDTH); // Number of selection bits
+      const size = resolveSize(width);
+      
+      const instanceId = cellName;
+
+      // Inputs
+      // A: Default value (when S=0)
+      const aRaw = ensureArray(cell.connections["A"], "A"); // Should be 'width' bits
+      let currentBus = packBits(aRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      // B: Option values (width * sWidth)
+      const bRaw = ensureArray(cell.connections["B"], "B");
+      
+      // S: Select bits (sWidth)
+      const sRaw = ensureArray(cell.connections["S"], "S", sWidth);
+      
+      // Chain Muxes
+      for (let i = 0; i < sWidth; i++) {
+          // Slice B for this option
+          const bSlice = bRaw.slice(i * width, (i + 1) * width);
+          const bPacked = packBits(bSlice.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+          
+          // Select Bit
+          const sBit = normalizeBit(sRaw[i], counter).id; // ID of the select bit
+          
+          // Create Mux
+          const muxId = `${instanceId}_pmux_${i}`;
+          const muxTemplate = getTemplate(`MUX_${size}`); // Use TC Mux (Switch)
+          const muxInst = instantiate(muxTemplate, muxId);
+          components.push(muxInst);
+          
+          // Connect Input 0 (Previous stage or A)
+          muxInst.connections["A"] = currentBus;
+          registerSink(nets, currentBus, {componentId: muxId, portId: "A"});
+          
+          // Connect Input 1 (This option B)
+          muxInst.connections["B"] = bPacked;
+          registerSink(nets, bPacked, {componentId: muxId, portId: "B"});
+          
+          // Connect Select
+          muxInst.connections["S"] = sBit;
+          registerSink(nets, sBit, {componentId: muxId, portId: "S"});
+          
+          // Output to next stage
+          const muxOut = `${muxId}_out`;
+          muxInst.connections["Y"] = muxOut;
+          registerSource(nets, muxOut, {componentId: muxId, portId: "Y"});
+          
+          currentBus = muxOut;
+      }
+      
+      // Final Output to Y
+      const yRaw = ensureArray(cell.connections["Y"], "Y");
+      unpackBits(currentBus, yRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      
+      continue;
+    }
+
+    // Comparisons ($eq)
+    if (cell.type === "$eq") {
+      const width = parseParamInt(cell.parameters?.A_WIDTH); // Assuming A and B widths match or handled by Yosys
+      const size = resolveSize(width);
+      const instanceId = cellName;
+      
+      const paramProp = (cell.parameters?.A_SIGNED ? cell.parameters.A_SIGNED : 0);
+      // Equal works for signed/unsigned same way usually? Yes bitwise equality.
+      
+      const compTemplate = getTemplate(`EQUAL_${size}`);
+      const compInst = instantiate(compTemplate, instanceId);
+      components.push(compInst);
+      
+      // Inputs
+      const aPacked = packBits(ensureArray(cell.connections["A"], "A").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      compInst.connections["A"] = aPacked;
+      registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+      
+      const bPacked = packBits(ensureArray(cell.connections["B"], "B").map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+      compInst.connections["B"] = bPacked;
+      registerSink(nets, bPacked, {componentId: instanceId, portId: "B"});
+      
+      // Output (1 bit)
+      const yBit = normalizeBit(ensureArray(cell.connections["Y"], "Y", 1)[0], counter).id;
+      compInst.connections["out"] = yBit;
+      registerSource(nets, yBit, {componentId: instanceId, portId: "out"});
+      
+      continue;
+    }
+
+    // Logic Not ($logic_not)
+    if (cell.type === "$logic_not") {
+      const width = parseParamInt(cell.parameters?.A_WIDTH);
+      const size = resolveSize(width);
+      const instanceId = cellName;
+      
+      const aRaw = ensureArray(cell.connections["A"], "A"); // width bits
+      const yBit = normalizeBit(ensureArray(cell.connections["Y"], "Y", 1)[0], counter).id;
+
+      if (width === 1) {
+          // Use NOT gate
+          const notInst = instantiate(getTemplate("NOT_1"), instanceId);
+          components.push(notInst);
+          const aBit = normalizeBit(aRaw[0], counter).id;
+          notInst.connections["A"] = aBit;
+          registerSink(nets, aBit, {componentId: instanceId, portId: "A"});
+          
+          notInst.connections["Y"] = yBit;
+          registerSource(nets, yBit, {componentId: instanceId, portId: "Y"});
+      } else {
+          // Use Equal(A, 0)
+          const eqTemplate = getTemplate(`EQUAL_${size}`);
+          const eqInst = instantiate(eqTemplate, instanceId);
+          components.push(eqInst);
+          
+          const aPacked = packBits(aRaw.map(b => normalizeBit(b, counter)), size, components, nets, idGen);
+          eqInst.connections["A"] = aPacked;
+          registerSink(nets, aPacked, {componentId: instanceId, portId: "A"});
+          
+          // Const 0
+          const constId = `${instanceId}_zero`;
+          const constTemplate = getTemplate(`CONST_${size}`); // 0 by default? Or need setting1=0?
+          const constInst = instantiate(constTemplate, constId);
+          if (!constInst.metadata) constInst.metadata = {};
+          constInst.metadata.setting1 = 0n;
+          components.push(constInst);
+          
+          const zeroBus = `${constId}_out`;
+          constInst.connections["out"] = zeroBus;
+          registerSource(nets, zeroBus, {componentId: constId, portId: "out"});
+          
+          eqInst.connections["B"] = zeroBus;
+          registerSink(nets, zeroBus, {componentId: instanceId, portId: "B"});
+          
+          eqInst.connections["out"] = yBit;
+          registerSource(nets, yBit, {componentId: instanceId, portId: "out"});
+      }
+      continue;
+    }
+
     const binding = CELL_LIBRARY[cell.type];
     if (!binding) {
       throw new Error(`Unsupported cell type ${cell.type}`);

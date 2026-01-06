@@ -292,6 +292,45 @@ SIZES.forEach((size) => {
   register(template(`SPLITTER_${size}`, `Splitter${size}`, splitterKind, splitterPorts));
 });
 
+// Comparisons
+const COMPS = {
+  EQUAL: { 8: ComponentKind.Equal8, 16: ComponentKind.Equal16, 32: ComponentKind.Equal32, 64: ComponentKind.Equal64 },
+  LESSU: { 8: ComponentKind.LessU8, 16: ComponentKind.LessU16, 32: ComponentKind.LessU32, 64: ComponentKind.LessU64 },
+  LESSI: { 8: ComponentKind.LessI8, 16: ComponentKind.LessI16, 32: ComponentKind.LessI32, 64: ComponentKind.LessI64 },
+};
+
+SIZES.forEach((size) => {
+  // Equal
+  // @ts-ignore
+  register(template(`EQUAL_${size}`, `Equal${size}`, COMPS.EQUAL[size], makePorts(["A", "B"], "out", size, 1)));
+  // Less Unsigned
+  // @ts-ignore
+  register(template(`LESSU_${size}`, `LessU${size}`, COMPS.LESSU[size], makePorts(["A", "B"], "out", size, 1)));
+  // Less Signed
+  // @ts-ignore
+  register(template(`LESSI_${size}`, `LessI${size}`, COMPS.LESSI[size], makePorts(["A", "B"], "out", size, 1)));
+});
+
+// Registers
+const REGISTERS = {
+  8: ComponentKind.Register8, 16: ComponentKind.Register16, 32: ComponentKind.Register32, 64: ComponentKind.Register64,
+};
+
+SIZES.forEach((size) => {
+  // @ts-ignore
+  register(template(
+    `REG_${size}`,
+    `Reg${size}`,
+    // @ts-ignore
+    REGISTERS[size],
+    [
+      { id: "value", direction: "in", position: { x: -1, y: 0 } },
+      { id: "save", direction: "in", position: { x: 0, y: -1 } }, // Assuming Top Load
+      { id: "out", direction: "out", position: { x: 1, y: 0 } },
+    ]
+  ));
+});
+
 export type TemplateId = keyof typeof templates;
 
 export function getTemplate(id: TemplateId): ComponentTemplate;
