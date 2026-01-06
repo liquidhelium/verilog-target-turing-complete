@@ -236,9 +236,9 @@ const IOS = {
 
 SIZES.forEach((size) => {
   // @ts-ignore
-  register(template(`INPUT_${size}`, `Input${size}`, IOS.INPUT[size], [{ id: "out", direction: "out", position: { x: 1, y: 0 } }]));
+  register(template(`INPUT_${size}`, `Input${size}`, IOS.INPUT[size], [{ id: "out", direction: "out", position: { x: size === 8 ? 1 : 2, y: 0 } }]));
   // @ts-ignore
-  register(template(`OUTPUT_${size}`, `Output${size}`, IOS.OUTPUT[size], [{ id: "in", direction: "in", position: { x: -1, y: 0 } }]));
+  register(template(`OUTPUT_${size}`, `Output${size}`, IOS.OUTPUT[size], [{ id: "in", direction: "in", position: { x: size === 8 ? -1 : -2, y: 0 } }]));
 });
 
 // Constants
@@ -246,8 +246,17 @@ const CONSTS = {
   8: ComponentKind.Constant8, 16: ComponentKind.Constant16, 32: ComponentKind.Constant32, 64: ComponentKind.Constant64,
 };
 SIZES.forEach((size) => {
-  // @ts-ignore
-  register(template(`CONST_${size}`, `Const${size}`, CONSTS[size], [{ id: "out", direction: "out", position: { x: 1, y: 0 } }]));
+  // Use 1 for 8-bit, 2 for others.
+  const x = size === 8 ? 1 : 2;
+  // Explicitly set bounds to anchor at x=0, so x=2 creates a valid body width.
+  register(template(
+    `CONST_${size}`, 
+    `Const${size}`, 
+    // @ts-ignore
+    CONSTS[size], 
+    [{ id: "out", direction: "out", position: { x, y: 0 } }],
+    { minX: 0, maxX: x, minY: 0, maxY: 0 }
+  ));
 });
 
 // Splitters and Makers

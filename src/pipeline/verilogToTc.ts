@@ -183,7 +183,7 @@ function toTcComponents(layout: LayoutResult, netlist: NetlistGraph): TCComponen
       rotation: component.template.rotation,
       permanentId: BigInt(index + 1),
       customString: typeof component.metadata?.label === "string" ? component.metadata.label : "",
-      setting1: 0n,
+      setting1: typeof component.metadata?.setting1 === "bigint" ? component.metadata.setting1 : 0n,
       setting2: 0n,
       uiOrder: 0,
       customDisplacement: { x: 0, y: 0 },

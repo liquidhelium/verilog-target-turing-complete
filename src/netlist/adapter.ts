@@ -180,6 +180,41 @@ function packBits(
     }
   }
 
+  // 1b. Check if ALL bits are constants -> Use CONST_N
+  let allConst = true;
+  let constValue = 0n;
+  for(let i=0; i<bits.length; i++) {
+      if (bits[i].constant === undefined) {
+          allConst = false;
+          break;
+      }
+      if (bits[i].constant === 1) {
+          constValue |= (1n << BigInt(i));
+      }
+  }
+  
+  // NOTE: Only optimize if FULL width is provided (or we are okay with padding 0s).
+  // bits might be shorter than targetSize (padding 0s).
+  // If bits are constant, padding 0 is just more constants.
+  if (allConst && bits.length <= targetSize) {
+      // Create Big Constant
+      const constId = idGen.next();
+      const constTpl = `CONST_${targetSize}`;
+      const instance = instantiate(getTemplate(constTpl), constId);
+      // We need to set the value. Constant components use 'setting1' or 'customString'? 
+      // Typically 'setting1' holds the value for Constants.
+      instance.metadata = { 
+          label: `0x${constValue.toString(16).toUpperCase()}`,
+          setting1: constValue 
+      };
+      
+      components.push(instance);
+      const busId = `${constId}_val`;
+      instance.connections["out"] = busId;
+      registerSource(nets, busId, {componentId: constId, portId: "out"});
+      return busId;
+  }
+
   // 2. If not optimizable, create a Maker
   const makerId = idGen.next();
   const makerTemplateId = `MAKER_${targetSize}`;
