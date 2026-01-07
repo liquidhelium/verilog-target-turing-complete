@@ -56,13 +56,7 @@ async function main() {
 
   let targets = allBenchmarks;
   if (filter) {
-      if (filter === 'new') {
-          targets = allBenchmarks.filter(b => b.category === 'new');
-      } else if (filter === 'old' || filter === 'basic') {
-          targets = allBenchmarks.filter(b => b.category === 'basic');
-      } else {
-          targets = allBenchmarks.filter(b => b.name.includes(filter));
-      }
+      targets = allBenchmarks.filter(b => b.name.includes(filter) || b.category == filter)
   }
 
   const outputBase = resolve("test_output");
