@@ -18,6 +18,8 @@ import {
   PortSide,
 } from "./types.js";
 
+const GRAPH_SCALE = 10;
+
 export class ElkRouter {
   private readonly gridSize: number;
   private readonly epsilon: number;
@@ -26,7 +28,9 @@ export class ElkRouter {
   constructor(options: ElkRouterOptions = {}) {
     this.gridSize = options.gridSize ?? 8;
     this.epsilon = options.epsilon ?? 0.1;
-    this.elkPromise = options.elk ? Promise.resolve(options.elk) : loadElkFacade();
+    this.elkPromise = options.elk
+      ? Promise.resolve(options.elk)
+      : loadElkFacade();
   }
 
   async route(graph: LayoutGraph): Promise<LayoutResult> {
@@ -45,12 +49,15 @@ export class ElkRouter {
         "elk.algorithm": "layered",
         "elk.direction": "RIGHT",
         "elk.layered.mergeEdges": "true",
-        "elk.spacing.nodeNode": "2",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "4",
-        "elk.layered.spacing.edgeNodeBetweenLayers": "2",
-        "elk.layered.spacing.edgeEdgeBetweenLayers": "1",
+        "elk.spacing.nodeNode": "20",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "40",
+        "elk.layered.spacing.edgeNodeBetweenLayers": "20",
+        "elk.layered.spacing.edgeEdgeBetweenLayers": "10",
         "elk.layered.compaction.connectedComponents": "true",
-        "elk.layered.nodePlacement.strategy": "LINEAR_SEGMENTS",
+        "elk.layered.compaction.postCompaction.strategy": "EDGE_LENGTH",
+        "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+        "elk.layered.layerUnzipping.strategy": "ALTERNATING",
+        "elk.layered.nodePlacement.bk.edgeStraightening": "IMPROVE_STRAIGHTNESS",
       },
       children,
       edges,
@@ -62,8 +69,8 @@ export class ElkRouter {
   private toElkNode(node: LayoutNode): ElkGraphNode {
     return {
       id: node.id,
-      width: node.width,
-      height: node.height,
+      width: node.width * GRAPH_SCALE,
+      height: node.height * GRAPH_SCALE,
       ports: node.ports.map((port) => this.toElkPort(node, port)),
       layoutOptions: {
         "elk.portConstraints": "FIXED_POS",
@@ -75,8 +82,8 @@ export class ElkRouter {
   private toElkPort(node: LayoutNode, port: LayoutPort): ElkGraphPort {
     return {
       id: `${node.id}.${port.id}`,
-      x: port.x,
-      y: port.y,
+      x: port.x * GRAPH_SCALE,
+      y: port.y * GRAPH_SCALE,
       layoutOptions: {
         "elk.port.side": port.side,
       },
@@ -84,15 +91,21 @@ export class ElkRouter {
   }
 
   private toElkEdge(edge: LayoutEdge): ElkGraphEdge {
-    const sources = edge.sources.map((endpoint) => `${endpoint.node}.${endpoint.port}`);
-    const targets = edge.targets.map((endpoint) => `${endpoint.node}.${endpoint.port}`);
+    const sources = edge.sources.map(
+      (endpoint) => `${endpoint.node}.${endpoint.port}`
+    );
+    const targets = edge.targets.map(
+      (endpoint) => `${endpoint.node}.${endpoint.port}`
+    );
     return {
       id: edge.id,
       sources,
       targets,
       layoutOptions: {
-        "elk.layered.spacing.edgeEdgeBetweenLayers": "5",
-        ...(edge.minLength ? { "elk.layered.edgeNodeSpacingFactor": String(edge.minLength) } : {}),
+        "elk.layered.spacing.edgeEdgeBetweenLayers": "50",
+        ...(edge.minLength
+          ? { "elk.layered.edgeNodeSpacingFactor": String(edge.minLength) }
+          : {}),
       },
     };
   }
@@ -107,9 +120,9 @@ export class ElkRouter {
       }
       nodes.push({
         id: child.id,
-        position: this.snapPoint({ x: child.x, y: child.y }),
-        width: child.width,
-        height: child.height,
+        position: this.snapPoint({ x: child.x / GRAPH_SCALE, y: child.y / GRAPH_SCALE }),
+        width: child.width / GRAPH_SCALE,
+        height: child.height / GRAPH_SCALE,
         ports: this.collectPortPlacements(child),
         data: child.data,
       });
@@ -125,17 +138,21 @@ export class ElkRouter {
     return { nodes, edges };
   }
 
-  private collectPortPlacements(node: ElkGraphNode): Record<string, LayoutPoint> {
+  private collectPortPlacements(
+    node: ElkGraphNode
+  ): Record<string, LayoutPoint> {
     const placements: Record<string, LayoutPoint> = {};
     for (const port of node.ports ?? []) {
       if (!port.id || port.x === undefined || port.y === undefined) {
         continue;
       }
       const prefix = `${node.id}.`;
-      const shortId = port.id.startsWith(prefix) ? port.id.substring(prefix.length) : port.id;
+      const shortId = port.id.startsWith(prefix)
+        ? port.id.substring(prefix.length)
+        : port.id;
       placements[shortId] = this.snapPoint({
-        x: (node.x ?? 0) + port.x,
-        y: (node.y ?? 0) + port.y,
+        x: (node.x ?? 0) / GRAPH_SCALE + port.x / GRAPH_SCALE,
+        y: (node.y ?? 0) / GRAPH_SCALE + port.y / GRAPH_SCALE,
       });
     }
     return placements;
@@ -145,13 +162,13 @@ export class ElkRouter {
     const points: LayoutPoint[] = [];
     for (const section of sections) {
       if (section.startPoint) {
-        points.push(this.snapPoint(section.startPoint));
+        points.push(this.snapPoint({ x: section.startPoint.x / GRAPH_SCALE, y: section.startPoint.y / GRAPH_SCALE }));
       }
       for (const bend of section.bendPoints ?? []) {
-        points.push(this.snapPoint(bend));
+        points.push(this.snapPoint({ x: bend.x / GRAPH_SCALE, y: bend.y / GRAPH_SCALE }));
       }
       if (section.endPoint) {
-        points.push(this.snapPoint(section.endPoint));
+        points.push(this.snapPoint({ x: section.endPoint.x / GRAPH_SCALE, y: section.endPoint.y / GRAPH_SCALE }));
       }
     }
     return this.compactPolyline(points);
@@ -200,11 +217,15 @@ export class ElkRouter {
 }
 
 async function loadElkFacade(): Promise<ElkFacade> {
-  const ElkConstructor = (await import("elkjs/lib/elk.bundled.js")).default as unknown as { new (): ELK };
+  const ElkConstructor = (await import("elkjs/lib/elk.bundled.js"))
+    .default as unknown as { new (): ELK };
   const elkInstance = new ElkConstructor();
   return {
     async layout(graph: ElkGraph, options?: Record<string, unknown>) {
-      const result = await elkInstance.layout(graph as unknown as Parameters<ELK["layout"]>[0], options);
+      const result = await elkInstance.layout(
+        graph as unknown as Parameters<ELK["layout"]>[0],
+        options
+      );
       return result as unknown as ElkGraph;
     },
   };
