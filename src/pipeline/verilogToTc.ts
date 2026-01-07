@@ -6,11 +6,50 @@ import { buildLayoutGraph } from "../layout/graphBuilder.js";
 import { ElkRouter } from "../layout/elkRouter.js";
 import { DefaultYosysBackend } from "../yosys/executor.js";
 import { TCSaveWriter, defaultSavePayload } from "../tc/saveWriter.js";
-import { TCComponent, TCPoint, TCSavePayload, WireColor, WireKind } from "../tc/types.js";
+import { ComponentKind, TCComponent, TCPoint, TCSavePayload, WireColor, WireKind } from "../tc/types.js";
 import { ComponentPort, CONST_0 } from "../tc/componentLibrary.js";
 import { LayoutResult } from "../layout/types.js";
 
 const GRID_SIZE = 1;
+
+const INPUT_KINDS = new Set([
+  ComponentKind.Input1,
+  ComponentKind.Input8,
+  ComponentKind.Input16,
+  ComponentKind.Input32,
+  ComponentKind.Input64,
+  ComponentKind.LevelInput1,
+  ComponentKind.LevelInput8,
+  ComponentKind.LevelInput2Pin,
+  ComponentKind.LevelInput3Pin,
+  ComponentKind.LevelInput4Pin,
+  ComponentKind.LevelInputConditions,
+  ComponentKind.LevelInputCode,
+  ComponentKind.LevelInputArch,
+]);
+
+const OUTPUT_KINDS = new Set([
+  ComponentKind.Output1,
+  ComponentKind.Output8,
+  ComponentKind.Output16,
+  ComponentKind.Output32,
+  ComponentKind.Output64,
+  ComponentKind.Output1z,
+  ComponentKind.Output8z,
+  ComponentKind.Output16z,
+  ComponentKind.Output32z,
+  ComponentKind.Output64z,
+  ComponentKind.LevelOutput1,
+  ComponentKind.LevelOutput8,
+  ComponentKind.LevelOutput1Sum,
+  ComponentKind.LevelOutput1Car,
+  ComponentKind.LevelOutput2Pin,
+  ComponentKind.LevelOutput3Pin,
+  ComponentKind.LevelOutput4Pin,
+  ComponentKind.LevelOutput8z,
+  ComponentKind.LevelOutputArch,
+  ComponentKind.LevelOutputCounter,
+]);
 
 export interface VerilogSources {
   [path: string]: string;
@@ -82,6 +121,88 @@ function decodeEdgeId(edgeId: string): { sourceComponent: string; sourcePort: st
     targetComponent: match[3],
     targetPort: match[4],
   };
+}
+
+function alignIOComponents(layout: LayoutResult, netlist: NetlistGraph) {
+  let minInputX = Number.POSITIVE_INFINITY;
+  let maxOutputX = Number.NEGATIVE_INFINITY;
+
+  const inputNodes: Array<{ node: (typeof layout.nodes)[0]; comp: ComponentInstance }> = [];
+  const outputNodes: Array<{ node: (typeof layout.nodes)[0]; comp: ComponentInstance }> = [];
+
+  for (const node of layout.nodes) {
+    const comp = netlist.components.find((c) => c.id === node.id);
+    if (!comp) continue;
+
+    if (INPUT_KINDS.has(comp.template.kind)) {
+      inputNodes.push({ node, comp });
+      minInputX = Math.min(minInputX, node.position.x);
+    } else if (OUTPUT_KINDS.has(comp.template.kind)) {
+      outputNodes.push({ node, comp });
+      maxOutputX = Math.max(maxOutputX, node.position.x + node.width);
+    }
+  }
+
+  // Safety check
+  if (!Number.isFinite(minInputX) || !Number.isFinite(maxOutputX)) {
+    return;
+  }
+
+  // Apply padding. Move inputs left, outputs right.
+  const inputTargetX = minInputX - 10;
+  const outputTargetX = maxOutputX + 10;
+
+  // Move Inputs
+  for (const { node } of inputNodes) {
+    const dx = inputTargetX - node.position.x;
+    if (Math.abs(dx) < 0.01) continue;
+
+    node.position.x += dx;
+    for (const portKey in node.ports) {
+      node.ports[portKey].x += dx;
+    }
+
+    // Update Edges originating from this node
+    // Input component edges start from here.
+    const prefix = `${node.id}::`;
+    for (const edge of layout.edges) {
+      if (edge.id.startsWith(prefix)) {
+        if (edge.points.length > 0) {
+          edge.points[0].x += dx;
+        }
+      }
+    }
+  }
+
+  // Move Outputs
+  for (const { node } of outputNodes) {
+    const currentRight = node.position.x + node.width;
+    const dx = outputTargetX - currentRight;
+    if (Math.abs(dx) < 0.01) continue;
+
+    node.position.x += dx;
+    for (const portKey in node.ports) {
+      node.ports[portKey].x += dx;
+    }
+
+    // Update Edges targeting this node
+    // Output component edges end here.
+    // Edge ID format: source::port=>target::port
+    const suffix = `=>${node.id}::`;
+    for (const edge of layout.edges) {
+      // Since edge.id format contains target info
+      // We can check if it contains "=>nodeId::"
+      // But verify strictly.
+      if (edge.id.includes(suffix)) {
+        const parts = decodeEdgeId(edge.id);
+        if (parts.targetComponent === node.id) {
+          if (edge.points.length > 0) {
+            edge.points[edge.points.length - 1].x += dx;
+          }
+        }
+      }
+    }
+  }
 }
 
 function roundPoint(point: { x: number; y: number }): TCPoint {
@@ -425,6 +546,8 @@ export async function convertVerilogToSave(
   const router = new ElkRouter({ gridSize: GRID_SIZE });
   const layout = await router.route(layoutGraph);
   
+  alignIOComponents(layout, netlist);
+
   centerLayout(layout);
 
   const payload = createPayload(layout, netlist, options.description);

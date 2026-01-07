@@ -48,6 +48,7 @@ export class ElkRouter {
       layoutOptions: {
         "elk.algorithm": "layered",
         "elk.direction": "RIGHT",
+        "elk.separateConnectedComponents": "false",
         "elk.layered.mergeEdges": "true",
         "elk.spacing.nodeNode": "20",
         "elk.layered.spacing.nodeNodeBetweenLayers": "40",
@@ -74,6 +75,7 @@ export class ElkRouter {
       ports: node.ports.map((port) => this.toElkPort(node, port)),
       layoutOptions: {
         "elk.portConstraints": "FIXED_POS",
+        ...node.layoutOptions,
       },
       data: node.data,
     };

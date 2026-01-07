@@ -13,6 +13,7 @@ export interface LayoutNode {
   height: number;
   ports: LayoutPort[];
   data?: Record<string, unknown>;
+  layoutOptions?: Record<string, string>;
 }
 
 export interface LayoutEdgeEndpoint {
