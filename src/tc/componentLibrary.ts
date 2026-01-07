@@ -301,8 +301,9 @@ SIZES.forEach((size) => {
       }
   } else {
       const chunks = size / 8;
+      const adj = size === 16 ? -1 : 0;
       for (let i = 0; i < chunks; i++) {
-        splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((chunks - 1) / 2) } });
+        splitterPorts.push({ id: `out${i}`, direction: "out", position: { x: 1, y: i - Math.floor((chunks - 1) / 2) + adj } });
       }
   }
 
@@ -387,8 +388,35 @@ const MATH = {
 };
 
 SIZES.forEach((size) => {
+  // Adder Ports:
+  // In: CarryIn (y=-1), A (y=0), B (y=1) -> But makePorts uses center logic.
+  // Actually TC Adder layout:
+  // Inputs (Left):
+  //  Top (y=-1): Carry In
+  //  Mid (y=0):  Operand 1
+  //  Bot (y=1):  Operand 2
+  // Outputs (Right):
+  //  Top (y=-1): Carry Out
+  //  Mid (y=0):  Sum
+  //
+  // Our makePorts centers inputs. 3 inputs -> y indices: -1, 0, 1.
+  // "A", "B" are usually operands.
+  // So we map: "carry_in", "A", "B".
+  // And outputs: "carry_out", "sum".
+  // Note: Yosys adapter currently maps to "A", "B" and "sum".
+  // We need to define ports such that "A" ends up at y=0, "B" at y=1.
+  // "carry_in" at y=-1.
+  
+  const addPorts: ComponentPort[] = [
+      { id: "carry_in", direction: "in", position: { x: -1, y: -1 } },
+      { id: "A", direction: "in", position: { x: -1, y: 0 } },
+      { id: "B", direction: "in", position: { x: -1, y: 1 } },
+      { id: "sum", direction: "out", position: { x: 1, y: -1 } },
+      { id: "carry_out", direction: "out", position: { x: 1, y: 0 } },
+    ];
   // @ts-ignore
-  register(template(`ADD_${size}`, `Add${size}`, MATH.ADD[size], makePorts(["A", "B"], "sum", size, 1)));
+  register(template(`ADD_${size}`, `Add${size}`, MATH.ADD[size], addPorts));
+  
   // @ts-ignore
   register(template(`MUL_${size}`, `Mul${size}`, MATH.MUL[size], makePorts(["A", "B"], "pro", size, 1)));
   // @ts-ignore

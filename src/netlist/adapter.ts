@@ -2385,31 +2385,12 @@ export function buildNetlistFromYosys(
       const size = resolveSize(width);
       const instanceId = cellName;
 
-      let templateId = "";
-      // Yosys $shl and $sshl are logically left shifts. $shr is logical right, $sshr is arithmetic right.
-      // TC Shl seems to be logical left. Shr logical right.
-      // Wait, TC usually has just Shl/Shr. If it strictly only supports one type, we map best effort.
-      // Assuming TC Shl/Shr are unsigned/logical.
-      // If $sshr (arithmetic), we might need Rol/Ror or specifically arithmetic shift components if they exist?
-      // Inspecting `types.ts`, valid components are `Shl8`, `Shr8`.
-      // I'll map Left -> SHL, Right -> SHR.
-
-      if (cell.type.includes("shl")) templateId = `SHL_${size}`;
-      else templateId = `SHR_${size}`;
-
-      const inst = instantiate(getTemplate(templateId), instanceId);
-      components.push(inst);
-
-      const aPacked = packBits(
-        ensureArray(cell.connections["A"], "A").map((b) =>
-          normalizeBit(b, counter)
-        ),
-        size,
-        components,
-        nets,
-        idGen
+      // Common inputs preparation
+      const aBits = ensureArray(cell.connections["A"], "A").map((b) =>
+        normalizeBit(b, counter)
       );
-      // Shift amount (B)
+      const aPacked = packBits(aBits, size, components, nets, idGen);
+
       const bPacked = packBits(
         ensureArray(cell.connections["B"], "B").map((b) =>
           normalizeBit(b, counter)
@@ -2419,6 +2400,143 @@ export function buildNetlistFromYosys(
         nets,
         idGen
       );
+
+      // Handle Arithmetic Right Shift ($sshr) specially
+      if (cell.type === "$sshr") {
+        // Logic: Y = (A >> B) | (Sign ? ~(~0 >> B) : 0)
+        // 1. Logical Shift A >> B
+        const shrId = `${instanceId}_shr`;
+        const shrInst = instantiate(getTemplate(`SHR_${size}`), shrId);
+        components.push(shrInst);
+        
+        shrInst.connections["A"] = aPacked;
+        registerSink(nets, aPacked, { componentId: shrId, portId: "A" });
+        shrInst.connections["shift"] = bPacked;
+        registerSink(nets, bPacked, { componentId: shrId, portId: "shift" });
+        
+        const logicOut = `${shrId}_out`;
+        shrInst.connections["out"] = logicOut;
+        registerSource(nets, logicOut, { componentId: shrId, portId: "out" });
+
+        // 2. Generate Mask Base: AllOnes >> B
+        const allOnesId = `${instanceId}_ones`;
+        const allOnesInst = instantiate(getTemplate(`CONST_${size}`), allOnesId);
+        allOnesInst.metadata = { setting1: (1n << BigInt(size)) - 1n }; // All 1s
+        components.push(allOnesInst);
+        
+        const allOnesWire = `${allOnesId}_val`;
+        allOnesInst.connections["out"] = allOnesWire;
+        registerSource(nets, allOnesWire, { componentId: allOnesId, portId: "out" });
+
+        const maskShrId = `${instanceId}_mask_shr`;
+        const maskShr = instantiate(getTemplate(`SHR_${size}`), maskShrId);
+        components.push(maskShr);
+        
+        maskShr.connections["A"] = allOnesWire;
+        registerSink(nets, allOnesWire, { componentId: maskShrId, portId: "A" });
+        maskShr.connections["shift"] = bPacked; // Same shift amount
+        registerSink(nets, bPacked, { componentId: maskShrId, portId: "shift" });
+        
+        const maskBase = `${maskShrId}_out`;
+        maskShr.connections["out"] = maskBase;
+        registerSource(nets, maskBase, { componentId: maskShrId, portId: "out" });
+
+        // 3. Invert Mask Base -> Mask = ~(~0 >> B)
+        const notMaskId = `${instanceId}_mask_not`;
+        const notMask = instantiate(getTemplate(`NOT_${size}`), notMaskId);
+        components.push(notMask);
+        
+        notMask.connections["A"] = maskBase;
+        registerSink(nets, maskBase, { componentId: notMaskId, portId: "A" });
+        
+        const maskWire = `${notMaskId}_out`;
+        notMask.connections["Y"] = maskWire;
+        registerSource(nets, maskWire, { componentId: notMaskId, portId: "Y" });
+
+        // 4. Select Extension based on Sign Bit
+        // Sign Bit is the MSB of A.
+        // We need to extract it. Since we don't have a clear "GetBit" component yet for arbitrary net,
+        // we rely on the fact that we have 'aBits' array which contains the bit IDs.
+        // However, 'aBits' might be shorter than 'size'. We need to be careful.
+        // normalizeBit/packBits logic: aBits is raw from Yosys.
+        let signBitId: string;
+        if (aBits.length > 0) {
+            // Yosys usually provides bits up to wire width.
+            // If A is signed, the last bit in the list is the sign bit (MSB).
+            signBitId = aBits[aBits.length - 1].id;
+        } else {
+            // Fallback for empty/zero constant? Unlikely for valid Sshr.
+            signBitId = normalizeBit(0, counter).id; 
+        }
+        
+        // Ensure driver if it's a constant 0/1
+        ensureDriverIfConstant(
+            { id: signBitId, constant: aBits[aBits.length-1]?.constant }, 
+            instanceId, "Sign", components, nets
+        );
+
+        // Mux: If Sign=1, use Mask. If Sign=0, use 0.
+        // We can use MUX_size. A(0)=0/Const0, B(1)=Mask, S=Sign.
+        const muxId = `${instanceId}_sign_mux`;
+        const muxInst = instantiate(getTemplate(`MUX_${size}`), muxId);
+        components.push(muxInst);
+        
+        // Input A (False/0 case) -> Const 0
+        const zeroId = `${instanceId}_zero`;
+        const zeroInst = instantiate(getTemplate(`CONST_${size}`), zeroId); // Value 0 default
+        components.push(zeroInst);
+        const zeroWire = `${zeroId}_out`;
+        zeroInst.connections["out"] = zeroWire;
+        registerSource(nets, zeroWire, { componentId: zeroId, portId: "out" });
+
+        muxInst.connections["A"] = zeroWire; 
+        registerSink(nets, zeroWire, { componentId: muxId, portId: "A" });
+        
+        muxInst.connections["B"] = maskWire;
+        registerSink(nets, maskWire, { componentId: muxId, portId: "B" });
+        
+        muxInst.connections["S"] = signBitId;
+        registerSink(nets, signBitId, { componentId: muxId, portId: "S" });
+        
+        const extWire = `${muxId}_out`;
+        muxInst.connections["Y"] = extWire;
+        registerSource(nets, extWire, { componentId: muxId, portId: "Y" });
+
+        // 5. Final OR: Main | Ext
+        const orId = `${instanceId}_final_or`;
+        const orInst = instantiate(getTemplate(`OR_${size}`), orId);
+        components.push(orInst);
+        
+        orInst.connections["A"] = logicOut;
+        registerSink(nets, logicOut, { componentId: orId, portId: "A" });
+        orInst.connections["B"] = extWire;
+        registerSink(nets, extWire, { componentId: orId, portId: "B" });
+
+        // Output to Y
+        const yRaw = ensureArray(cell.connections["Y"], "Y");
+        const busOut = `${instanceId}_out`;
+        orInst.connections["Y"] = busOut;
+        registerSource(nets, busOut, { componentId: instanceId, portId: "Y" });
+
+        unpackBits(
+          busOut,
+          yRaw.map((b) => normalizeBit(b, counter)),
+          size,
+          components,
+          nets,
+          idGen
+        );
+        
+        continue;
+      }
+
+      // Standard behavior for shl, shr
+      let templateId = "";
+      if (cell.type.includes("shl")) templateId = `SHL_${size}`;
+      else templateId = `SHR_${size}`;
+
+      const inst = instantiate(getTemplate(templateId), instanceId);
+      components.push(inst);
 
       inst.connections["A"] = aPacked;
       inst.connections["shift"] = bPacked; // Map Yosys B to TC shift

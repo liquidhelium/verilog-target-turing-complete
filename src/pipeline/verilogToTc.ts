@@ -496,13 +496,16 @@ function optimizeNetlist(netlist: NetlistGraph) {
     componentMap.set(c.id, c);
   }
 
+  // 1. Identify Zero/Off Constants
+  const zeroNetIds = new Set<string>();
   const CONST_MULTI_IDS = new Set(["CONST_8", "CONST_16", "CONST_32", "CONST_64"]);
 
   for (const component of netlist.components) {
     let isZero = false;
     if (component.template.id === CONST_0.id) {
        isZero = true;
-    } else if (CONST_MULTI_IDS.has(component.template.id)) {
+    } 
+    else if (CONST_MULTI_IDS.has(component.template.id)) {
        const val = component.metadata?.setting1;
        if (val === 0n) {
            isZero = true; 
@@ -512,10 +515,40 @@ function optimizeNetlist(netlist: NetlistGraph) {
     if (isZero) {
        const outNetId = component.connections["out"];
        if (outNetId) {
+         zeroNetIds.add(outNetId);
          netsToRemove.add(outNetId);
        }
        componentsToRemove.add(component.id);
     }
+  }
+
+  // 2. Identify AND gates with a Zero Input -> Remove gate, output is Zero
+  //    (This propagates the Zero signal)
+  //    However, simply removing the AND gate leaves its output net floating (which is 0).
+  //    So we can just remove the AND gate and its output net driver.
+  //    This logic can be iterative, but one pass catches immediate ANDs connected to constants.
+  
+  for (const component of netlist.components) {
+      if (component.template.id === "AND_1") {
+          const netA = component.connections["A"];
+          const netB = component.connections["B"];
+          // If any input is connected to a net that is known to be Zero (or floating/removed)
+          // Actually, if we marked the net for removal, we consider it 0.
+          
+          const isInputZero = (netA && netsToRemove.has(netA)) || (netB && netsToRemove.has(netB));
+          
+          if (isInputZero || !netA || !netB) { // !netA implies floating input -> 0
+              // AND with 0 is 0.
+              // Remove this AND gate.
+              componentsToRemove.add(component.id);
+              
+              // Its output is also effectively 0.
+              const outNetId = component.connections["Y"];
+              if (outNetId) {
+                  netsToRemove.add(outNetId);
+              }
+          }
+      }
   }
 
   if (componentsToRemove.size > 0) {
