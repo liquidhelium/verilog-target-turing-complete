@@ -7,7 +7,7 @@ import { ElkRouter } from "../layout/elkRouter.js";
 import { DefaultYosysBackend } from "../yosys/executor.js";
 import { TCSaveWriter, defaultSavePayload } from "../tc/saveWriter.js";
 import { TCComponent, TCPoint, TCSavePayload, WireColor, WireKind } from "../tc/types.js";
-import { ComponentPort } from "../tc/componentLibrary.js";
+import { ComponentPort, CONST_0 } from "../tc/componentLibrary.js";
 import { LayoutResult } from "../layout/types.js";
 
 const GRID_SIZE = 1;
@@ -367,12 +367,60 @@ function centerLayout(layout: LayoutResult) {
   }
 }
 
+function optimizeNetlist(netlist: NetlistGraph) {
+  const componentsToRemove = new Set<string>();
+  const netsToRemove = new Set<string>();
+  const componentMap = new Map<string, ComponentInstance>();
+  for (const c of netlist.components) {
+    componentMap.set(c.id, c);
+  }
+
+  const CONST_MULTI_IDS = new Set(["CONST_8", "CONST_16", "CONST_32", "CONST_64"]);
+
+  for (const component of netlist.components) {
+    let isZero = false;
+    if (component.template.id === CONST_0.id) {
+       isZero = true;
+    } else if (CONST_MULTI_IDS.has(component.template.id)) {
+       const val = component.metadata?.setting1;
+       if (val === 0n) {
+           isZero = true; 
+       }
+    }
+
+    if (isZero) {
+       const outNetId = component.connections["out"];
+       if (outNetId) {
+         netsToRemove.add(outNetId);
+       }
+       componentsToRemove.add(component.id);
+    }
+  }
+
+  if (componentsToRemove.size > 0) {
+      netlist.components = netlist.components.filter(c => !componentsToRemove.has(c.id));
+      for (const netId of netsToRemove) {
+          const net = netlist.nets.get(netId);
+           if (net) {
+               for (const sink of net.sinks) {
+                   const sinkComp = componentMap.get(sink.componentId);
+                   if (sinkComp) {
+                       delete sinkComp.connections[sink.portId];
+                   }
+               }
+           }
+          netlist.nets.delete(netId);
+      }
+  }
+}
+
 export async function convertVerilogToSave(
   sources: VerilogSources,
   options: ConvertOptions,
 ): Promise<ConvertResult> {
   const yosysJson = await runSynthesis(sources, options);
   const netlist = buildNetlistFromYosys(yosysJson, { topModule: options.topModule });
+  optimizeNetlist(netlist);
   const layoutGraph = buildLayoutGraph(netlist);
   const router = new ElkRouter({ gridSize: GRID_SIZE });
   const layout = await router.route(layoutGraph);
