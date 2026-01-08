@@ -139,23 +139,28 @@ export async function runCli(args: string[]): Promise<void> {
       }, 
     );
     
-    // outputPath/<moduleName>/circuit.data
-    // Wait, with CLI using specific output path for "Generate Benchmarks" script, we might need flexibility.
-    // The current CLI implementation takes <output_folder> and writes result INSIDE <output_folder>/<topModule>/circuit.data.
-    // If I want to exactly match generate_benchmarks expectation, I should verify CLI behavior.
-    
-    // Re-checking CLI behavior:
-    // It takes "output_folder".
-    // It creates "output_folder/dependencies/..."
-    // It creates "output_folder/<TopModuleName>/circuit.data"
-    // So if I call cli with "test_output/MyBench", it creates "test_output/MyBench/TopMod/circuit.data".
-    
-    // But generate_benchmarks usually creates "test_output/MyBench/circuit.data" (if only top) or structure.
-    
-    const topFolder = join(outputPath, topModuleName);
-    await mkdir(topFolder, { recursive: true });
-    await writeFile(join(topFolder, "circuit.data"), saveFile);
-    console.log(`Wrote schematic to directory: ${join(outputPathRaw, topModuleName)}`);
+    // output/TopModule/circuit.data
+    // If we have dependencies, we typically output a project structure:
+    //   output/
+    //     dependencies/
+    //     TopModule/
+    //       circuit.data
+    //
+    // But if we have NO dependencies, user likely wants the output folder to BE the component folder:
+    //   output/
+    //     circuit.data
+    //
+    // This avoids double nesting (output/TopModule/circuit.data) for simple single-file components.
+
+    if (deps.length > 0) {
+        const topFolder = join(outputPath, topModuleName);
+        await mkdir(topFolder, { recursive: true });
+        await writeFile(join(topFolder, "circuit.data"), saveFile);
+        console.log(`Wrote schematic to directory: ${join(outputPathRaw, topModuleName)}`);
+    } else {
+        await writeFile(join(outputPath, "circuit.data"), saveFile);
+        console.log(`Wrote schematic to directory: ${outputPathRaw}`);
+    }
 
   } catch (error) {
      throw error;
