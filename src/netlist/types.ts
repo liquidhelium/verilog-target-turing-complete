@@ -1,6 +1,11 @@
-import { ComponentTemplate } from "../tc/componentLibrary.js";
+import { ComponentTemplate, ComponentPort } from "../tc/componentLibrary.js";
 
 export type NetBitId = string;
+
+export interface CustomComponentMeta {
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  ports: ComponentPort[];
+}
 
 export interface PortRef {
   componentId: string;

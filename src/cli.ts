@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, dirname, basename, join } from "node:path";
 import { convertVerilogToSave } from "./pipeline/verilogToTc.js";
 import { parseModules } from "./utils/verilogUtils.js";
+import { CustomComponentMeta } from "./netlist/types.js";
 
 function printUsage(): void {
   console.error("Usage: verilog2tc --top <top_module> [--compact] [--no-flatten] <input.v> <output_folder>");
@@ -36,25 +37,20 @@ export async function runCli(args: string[]): Promise<void> {
 
   const [inputPathRaw, outputPathRaw] = paths;
   const inputPath = resolve(process.cwd(), inputPathRaw);
-  const outputPath = resolve(process.cwd(), outputPathRaw); // This is now treated as a specific folder for the schematic
+  const outputPath = resolve(process.cwd(), outputPathRaw); 
   const verilog = await readFile(inputPath, "utf-8");
 
   try {
     const virtualName = basename(inputPath);
 
-    // 1. Create output directory (schematic folder)
+    // 1. Create output directory
     await mkdir(outputPath, { recursive: true });
 
-    // 2. Parse modules to find Custom Component dependencies
+    // 2. Parse modules
     const modules = parseModules(verilog);
-    
-    // Auto-generate IDs for modules that don't have one, excluding the top module
     const topModuleName = top || modules[0]?.name; 
     
-    // Helper to hash string to bigint (63-bit FNV-1a-like)
-    // We use 63-bit to ensure the ID is interpreted as a positive number by Godot's signed 64-bit integers.
-    // If we used 64-bit, the MSB might be interpreted as a sign bit, causing a mismatch between 
-    // the folder name (JS BigInt.toString() is unsigned) and the in-game ID (signed).
+    // Helper to hash string to bigint
     const hashStringId = (str: string): bigint => {
         let hash = 0xcbf29ce484222325n;
         for (let i = 0; i < str.length; i++) {
@@ -65,30 +61,73 @@ export async function runCli(args: string[]): Promise<void> {
         return hash & 0x7fffffffffffffffn;
     };
 
-    const deps = modules
-        .filter(m => m.name !== topModuleName) // Exclude top module
+    const depsRaw = modules
+        .filter(m => m.name !== topModuleName) 
         .map(m => {
             if (m.customId === undefined) {
-                // Auto-assign ID from hash of name
                 return { ...m, customId: hashStringId(m.name) };
             }
             return m;
         });
     
-    // Create a mapping for the top module to resolve these blackboxes to IDs
     const customComponentMapping: Record<string, bigint> = {};
-    for (const dep of deps) {
+    for (const dep of depsRaw) {
         if (dep.customId !== undefined) {
              customComponentMapping[dep.name] = dep.customId;
         }
     }
 
-    // 3. Build Dependencies if any
-    if (deps.length > 0) {
+    // Sort dependencies
+    const moduleMap = new Map(depsRaw.map(m => [m.name, m]));
+    const graph = new Map<string, string[]>();
+
+    for (const mod of depsRaw) {
+        const d: string[] = [];
+        for (const potentialDep of depsRaw) {
+            if (mod.name === potentialDep.name) continue;
+            // Simple heuristic: check if module name appears as a word in body
+            const re = new RegExp(`\\b${potentialDep.name}\\b`);
+            if (re.test(mod.body)) {
+                d.push(potentialDep.name);
+            }
+        }
+        graph.set(mod.name, d);
+    }
+
+    const visited = new Set<string>();
+    const temp = new Set<string>();
+    const sortedDeps: typeof depsRaw = [];
+
+    const visit = (name: string, path: string[]) => {
+        if (temp.has(name)) {
+             throw new Error(`Circular dependency detected: ${path.join(" -> ")} -> ${name}`);
+        }
+        if (visited.has(name)) return;
+        
+        temp.add(name);
+        const myDeps = graph.get(name) || [];
+        for (const depName of myDeps) {
+            visit(depName, [...path, name]);
+        }
+        temp.delete(name);
+        visited.add(name);
+        sortedDeps.push(moduleMap.get(name)!);
+    };
+
+    for (const mod of depsRaw) {
+        if (!visited.has(mod.name)) {
+             visit(mod.name, []);
+        }
+    }
+
+    const customComponentDefinitions: Record<string, CustomComponentMeta> = {};
+
+    // 3. Build Dependencies
+    if (sortedDeps.length > 0) {
       const depsFolder = join(outputPath, "dependencies");
       await mkdir(depsFolder, { recursive: true });
 
-      for (const dep of deps) {
+      for (const dep of sortedDeps) {
         const depFolder = join(depsFolder, dep.name);
         await mkdir(depFolder, { recursive: true });
         
@@ -100,30 +139,28 @@ export async function runCli(args: string[]): Promise<void> {
             topModule: dep.name, 
             description: `Submodule: ${dep.name}`,
             compact,
-            flatten: true, // Dependencies themselves are valid to be flattened internally
-            saveId: dep.customId
+            flatten: true, 
+            saveId: dep.customId,
+            customComponentMapping,
+            customComponentDefinitions
           }
         );
         await writeFile(join(depFolder, "circuit.data"), depResult.saveFile);
+        
+        if (depResult.customMetadata) {
+            customComponentDefinitions[dep.name] = depResult.customMetadata;
+        }
       }
     }
 
     // 4. Build Top Module
-    // If we have dependencies, we need to mark them as blackboxes so Yosys (even with flatten) 
-    // preserves them as component instances instead of dissolving them.
     let topSource = verilog;
-    if (deps.length > 0) {
-        for (const dep of deps) {
-              // Inject (* blackbox *) to preserve hierarchy for these specific modules
+    if (sortedDeps.length > 0) {
+        for (const dep of sortedDeps) {
               const moduleDeclRegex = new RegExp(`module\\s+${dep.name}\\b`);
               topSource = topSource.replace(moduleDeclRegex, `(* blackbox *) module ${dep.name}`);
         }
     }
-
-    // NOTE: flatten is TRUE by default. 
-    // Even if we have deps, we use (* blackbox *) to protect THEM, 
-    // whilst allowing the rest of the logic to flatten (which is usually desired).
-    // User can override with --no-flatten if they want full hierarchy preservation (risky for TC compatibility).
     
     const topSaveId = hashStringId(top || modules[0]?.name || "Circuit");
 
@@ -134,25 +171,13 @@ export async function runCli(args: string[]): Promise<void> {
           description: `Generated from ${inputPathRaw}`, 
           compact, 
           flatten,
-          customComponentMapping, // Pass mapping so adapter knows how to map blackboxed types to IDs
+          customComponentMapping,
+          customComponentDefinitions,
           saveId: topSaveId
       }, 
     );
-    
-    // output/TopModule/circuit.data
-    // If we have dependencies, we typically output a project structure:
-    //   output/
-    //     dependencies/
-    //     TopModule/
-    //       circuit.data
-    //
-    // But if we have NO dependencies, user likely wants the output folder to BE the component folder:
-    //   output/
-    //     circuit.data
-    //
-    // This avoids double nesting (output/TopModule/circuit.data) for simple single-file components.
 
-    if (deps.length > 0) {
+    if (sortedDeps.length > 0) {
         const topFolder = join(outputPath, topModuleName);
         await mkdir(topFolder, { recursive: true });
         await writeFile(join(topFolder, "circuit.data"), saveFile);

@@ -21,6 +21,7 @@ import {
   NetBitId,
   NetlistGraph,
   PortRef,
+  CustomComponentMeta,
 } from "./types.js";
 
 interface YosysPort {
@@ -46,6 +47,8 @@ interface YosysJson {
 
 export interface YosysAdapterOptions {
   topModule: string;
+  customComponentMapping?: Record<string, bigint>;
+  customComponentDefinitions?: Record<string, CustomComponentMeta>;
 }
 
 type SizeMap = { [size: number]: string };
@@ -3062,68 +3065,83 @@ export function buildNetlistFromYosys(
     }
 
     if (!binding && customIdVal !== undefined) {
-             const ports: ComponentPort[] = [];
-             let inputCount = 0;
-             let outputCount = 0;
-             const dirs = cell.port_directions || {};
-             const portWidths: Record<string, number> = {};
-             
-             for (const [pName, dir] of Object.entries(dirs)) {
-                 const bits = cell.connections[pName] || [];
-                 portWidths[pName] = bits.length;
+      const customDef = options.customComponentDefinitions?.[cell.type];
+      const dirs = cell.port_directions || {};
+      const portWidths: Record<string, number> = {};
+      
+      for (const [pName] of Object.entries(dirs)) {
+          const bits = cell.connections[pName] || [];
+          portWidths[pName] = bits.length;
+      }
 
-                 if (dir === "input") {
-                     ports.push({ 
-                        id: pName, 
-                        direction: "in", 
-                        position: { x: -2, y: inputCount } 
-                     });
-                     inputCount += 2; // Spacing
-                 } else if (dir === "output") {
-                     ports.push({ 
-                        id: pName, 
-                        direction: "out", 
-                        position: { x: 2, y: outputCount } 
-                     });
-                     outputCount += 2;
-                 }
-             }
-             
-             // Create Template
-             const dynamicTemplate: ComponentTemplate = {
-                 id: `CUSTOM_${cell.type}`,
-                 name: "Custom",
-                 kind: ComponentKind.Custom,
-                 rotation: ComponentRotation.Rot0,
-                 ports: ports,
-                 bounds: { 
-                    minX: -2, maxX: 2, 
-                    minY: 0, maxY: Math.max(inputCount, outputCount) 
-                 }
-             };
+      let dynamicTemplate: ComponentTemplate;
+      if (customDef) {
+          dynamicTemplate = {
+            id: `CUSTOM_${cell.type}`,
+            name: cell.type,
+            kind: ComponentKind.Custom,
+            rotation: ComponentRotation.Rot0,
+            ports: customDef.ports,
+            bounds: customDef.bounds
+          };
+      } else {
+          const ports: ComponentPort[] = [];
+          let inputCount = 0;
+          let outputCount = 0;
+          
+          for (const [pName, dir] of Object.entries(dirs)) {
+              if (dir === "input") {
+                  ports.push({ 
+                    id: pName, 
+                    direction: "in", 
+                    position: { x: -2, y: inputCount } 
+                  });
+                  inputCount += 2; 
+              } else if (dir === "output") {
+                  ports.push({ 
+                    id: pName, 
+                    direction: "out", 
+                    position: { x: 2, y: outputCount } 
+                  });
+                  outputCount += 2;
+              }
+          }
+          
+          dynamicTemplate = {
+              id: `CUSTOM_${cell.type}`,
+              name: "Custom",
+              kind: ComponentKind.Custom,
+              rotation: ComponentRotation.Rot0,
+              ports: ports,
+              bounds: { 
+                minX: -2, maxX: 2, 
+                minY: 0, maxY: Math.max(inputCount, outputCount) 
+              }
+          };
+      }
 
-             const instance = instantiate(dynamicTemplate, cellName);
-             instance.metadata = { customId: customIdVal, label: cell.type, portWidths };
-             components.push(instance);
-             
-             // Connect ports
-             for (const [pName, dir] of Object.entries(dirs)) {
-                 const bits = ensureArray(cell.connections[pName], pName);
-                 const width = bits.length;
-                 const normBits = bits.map(b => normalizeBit(b, counter));
+      const instance = instantiate(dynamicTemplate, cellName);
+      instance.metadata = { customId: customIdVal, label: cell.type, portWidths };
+      components.push(instance);
+      
+      // Connect ports
+      for (const [pName, dir] of Object.entries(dirs)) {
+          const bits = ensureArray(cell.connections[pName], pName);
+          const width = bits.length;
+          const normBits = bits.map(b => normalizeBit(b, counter));
 
-                 if (dir === "input") {
-                     const busId = packBits(normBits, width, components, nets, idGen);
-                     instance.connections[pName] = busId;
-                     registerSink(nets, busId, { componentId: cellName, portId: pName });
-                 } else {
-                     const busId = `${cellName}_${pName}`;
-                     instance.connections[pName] = busId;
-                     registerSource(nets, busId, { componentId: cellName, portId: pName });
-                     unpackBits(busId, normBits, width, components, nets, idGen);
-                 }
-             }
-             continue;
+          if (dir === "input") {
+              const busId = packBits(normBits, width, components, nets, idGen);
+              instance.connections[pName] = busId;
+              registerSink(nets, busId, { componentId: cellName, portId: pName });
+          } else {
+              const busId = `${cellName}_${pName}`;
+              instance.connections[pName] = busId;
+              registerSource(nets, busId, { componentId: cellName, portId: pName });
+              unpackBits(busId, normBits, width, components, nets, idGen);
+          }
+      }
+      continue;
     }
 
     if (!binding) {

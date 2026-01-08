@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { basename, dirname } from "node:path";
 import { buildNetlistFromYosys } from "../netlist/adapter.js";
-import { NetlistGraph, ComponentInstance } from "../netlist/types.js";
+import { NetlistGraph, ComponentInstance, CustomComponentMeta } from "../netlist/types.js";
 import { buildLayoutGraph } from "../layout/graphBuilder.js";
 import { ElkRouter } from "../layout/elkRouter.js";
 import { DefaultYosysBackend } from "../yosys/executor.js";
@@ -62,6 +62,7 @@ export interface ConvertOptions {
   compact?: boolean;
   flatten?: boolean;
   customComponentMapping?: Record<string, bigint>;
+  customComponentDefinitions?: Record<string, CustomComponentMeta>;
   saveId?: bigint;
 }
 
@@ -69,6 +70,7 @@ export interface ConvertResult {
   payload: TCSavePayload;
   saveFile: Uint8Array;
   uncompressed: Uint8Array;
+  customMetadata?: CustomComponentMeta;
   debugInfo?: {
       layoutJson: any;
       yosysJson: any;
@@ -302,6 +304,13 @@ function toTcComponents(layout: LayoutResult, netlist: NetlistGraph): TCComponen
       x: placement.position.x - component.template.bounds.minX,
       y: placement.position.y - component.template.bounds.minY,
     };
+
+    if (component.template.kind === ComponentKind.Custom) {
+        // Offset custom components by -16 to match TC's coordinate system
+        pos.x -= 32;
+        pos.y -= 32;
+    }
+
     return {
       kind: component.template.kind,
       position: pos,
@@ -640,6 +649,50 @@ function optimizeNetlist(netlist: NetlistGraph) {
   }
 }
 
+function extractCustomMetadata(layout: LayoutResult, netlist: NetlistGraph): CustomComponentMeta {
+  const nodePositions = mapNodePositions(layout, netlist);
+  let minGridX = Infinity, maxGridX = -Infinity, minGridY = Infinity, maxGridY = -Infinity;
+
+  // Mark occupied grids
+  for (const node of layout.nodes) {
+    const x1 = Math.round(node.position.x);
+    const y1 = Math.round(node.position.y);
+    const x2 = x1 + Math.max(1, Math.round(node.width)) - 1;
+    const y2 = y1 + Math.max(1, Math.round(node.height)) - 1;
+
+    const startGx = Math.floor(x1 / 8);
+    const endGx = Math.floor(x2 / 8);
+    const startGy = Math.floor(y1 / 8);
+    const endGy = Math.floor(y2 / 8);
+
+    if (startGx < minGridX) minGridX = startGx;
+    if (endGx > maxGridX) maxGridX = endGx;
+    if (startGy < minGridY) minGridY = startGy;
+    if (endGy > maxGridY) maxGridY = endGy;
+  }
+  
+  if (minGridX === Infinity) { minGridX=0; maxGridX=0; minGridY=0; maxGridY=0; }
+
+  const ports: ComponentPort[] = [];
+  for (const comp of netlist.components) {
+      if (INPUT_KINDS.has(comp.template.kind) || OUTPUT_KINDS.has(comp.template.kind)) {
+          const pos = nodePositions.get(comp.id);
+          const portName = comp.metadata?.modulePort?.portName || comp.metadata?.label || comp.id;
+          if (pos) {
+             const gx = Math.floor(pos.position.x / 8);
+             const gy = Math.floor(pos.position.y / 8);
+             ports.push({
+                 id: portName,
+                 position: { x: gx, y: gy },
+                 direction: INPUT_KINDS.has(comp.template.kind) ? "in" : "out"
+             });
+          }
+      }
+  }
+
+  return { bounds: { minX: minGridX, maxX: maxGridX, minY: minGridY, maxY: maxGridY }, ports };
+}
+
 export async function convertVerilogToSave(
   sources: VerilogSources,
   options: ConvertOptions,
@@ -647,7 +700,8 @@ export async function convertVerilogToSave(
   const yosysJson = await runSynthesis(sources, options);
   const netlist = buildNetlistFromYosys(yosysJson, { 
     topModule: options.topModule, 
-    customComponentMapping: options.customComponentMapping 
+    customComponentMapping: options.customComponentMapping,
+    customComponentDefinitions: options.customComponentDefinitions
   });
   optimizeNetlist(netlist);
   const layoutGraph = buildLayoutGraph(netlist);
@@ -659,6 +713,26 @@ export async function convertVerilogToSave(
   }
 
   centerLayout(layout);
+  const customMetadata = extractCustomMetadata(layout, netlist);
+  
+  // Adjust metadata for TC coordinate system mismatch
+  // The internal layout is centered correctly for viewing the circuit.
+  // However, when this circuit is used as a Custom Component, TC expects the 
+  // Custom Component's grid coordinates to be relative to a different origin.
+  // User specifies we need to subtract 16 grids from the calculated bounding box/port positions using the layout.
+  if (customMetadata) {
+      const GRID_OFFSET = 16;
+      customMetadata.bounds.minX -= GRID_OFFSET;
+      customMetadata.bounds.maxX -= GRID_OFFSET;
+      customMetadata.bounds.minY -= GRID_OFFSET;
+      customMetadata.bounds.maxY -= GRID_OFFSET;
+      
+      for (const port of customMetadata.ports) {
+          port.position.x -= GRID_OFFSET;
+          port.position.y -= GRID_OFFSET;
+      }
+  }
+
   const payload = createPayload(layout, netlist, options.description, options.saveId, options.compact);
   const writer = new TCSaveWriter(payload);
   const { saveFile, uncompressed } = await writer.build();
@@ -666,6 +740,7 @@ export async function convertVerilogToSave(
       payload, 
       saveFile, 
       uncompressed,
+      customMetadata,
       debugInfo: options.debug ? { layoutJson: layout, yosysJson } : undefined
   };
 }
