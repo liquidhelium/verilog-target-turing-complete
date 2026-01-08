@@ -343,6 +343,70 @@ function packBits(
     return bits[0].id;
   }
 
+  // 0. Optimization: check if bits correspond to a smaller bus that can be zero-extended
+  // e.g. 8 bits -> 32 bits (bottom 8 match a bus, top 24 are zero)
+  // Check typical bus sizes from largest (closest to target) down to 1
+  const checkSizes = [32, 16, 8, 1].filter((s) => s < targetSize);
+  for (const size of checkSizes) {
+    // 1. Check if all upper bits are constant 0
+    let upperZero = true;
+    for (let i = size; i < bits.length; i++) {
+        // Must be present and zero
+        if (bits[i].constant !== 0) {
+            upperZero = false;
+            break;
+        }
+    }
+    // Also consider bits length vs targetSize padding? usually bits.length == targetSize
+    if (!upperZero) continue;
+
+    // 2. Check if lower bits match a coherent bus source of width 'size'
+    if (size === 1) {
+        // Single bit case: Check if bits[0] is a signal (not constant)
+        if (bits[0].constant === undefined) {
+             return bits[0].id;
+        }
+        // If it is constant, we fail through to CONST logic which is better
+    } else {
+        // Multi-bit case: Check if bits[0..size-1] come from the same splitter or source
+        // We look at bits[0] to find a candidate splitter
+        // We use immediate check logic here instead of resolveSplitterSource because we want the
+        // specific immediate bus of this size.
+        const firstId = bits[0].id;
+        const driver = nets.get(firstId)?.source;
+        
+        if (driver) {
+            const comp = components.find(c => c.id === driver.componentId);
+            // Check if it is a Splitter of 'size'
+            if (comp && comp.template.id === `SPLITTER_${size}`) {
+                let allMatch = true;
+                for(let i=0; i<size; i++) {
+                     const d = nets.get(bits[i].id)?.source;
+                     if (!d || d.componentId !== comp.id || d.portId !== `out${i}`) {
+                         allMatch = false;
+                         break;
+                     }
+                }
+                if (allMatch) {
+                    const busId = comp.connections["in"];
+                    if (busId) return busId;
+                }
+            } else {
+                 // Try resolveSplitterSource for hierarchical cases?
+                 // If resolveSplitterSource points to a SPLITTER_SOURCE matching size, use it.
+                 // But resolveSplitterSource tends to go up. 
+                 // If we have 32 -> 8 -> bits. resolve leads to 32. 
+                 // If we want 16 -> 8 -> bits. resolve leads to 16.
+                 // If the source IS size 'size', then resolveSplitterSource works.
+                 // If the source is LARGER, resolveSplitterSource returns larger.
+                 
+                 // If we have `WIRE_8` -> `SPLITTER_8` -> bits.
+                 // Then `bits` match `SPLITTER_8`.
+            }
+        }
+    }
+  }
+
   // 1. Check if these bits come from a Splitter of compatible size/alignment
   // Supports masking via AND/CONST if some bits are zeroed
   if ([8, 16, 32, 64].includes(targetSize)) {
