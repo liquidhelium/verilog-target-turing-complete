@@ -122,6 +122,8 @@ async function main(): Promise<void> {
     // whilst allowing the rest of the logic to flatten (which is usually desired).
     // User can override with --no-flatten if they want full hierarchy preservation (risky for TC compatibility).
     
+    const topSaveId = hashStringId(top || modules[0]?.name || "Circuit");
+
     const { saveFile } = await convertVerilogToSave(
       { [virtualName]: topSource },
       { 
@@ -130,13 +132,15 @@ async function main(): Promise<void> {
           compact, 
           flatten,
           customComponentMapping, // Pass mapping so adapter knows how to map blackboxed types to IDs
-          saveId: hashStringId(top || modules[0]?.name || "Circuit")
+          saveId: topSaveId
       }, 
     );
     
-    // Write top circuit.data
-    await writeFile(join(outputPath, "circuit.data"), saveFile);
-    console.log(`Wrote schematic to directory: ${outputPathRaw}`);
+    // outputPath/<topSaveId>/circuit.data
+    const topFolder = join(outputPath, topSaveId.toString());
+    await mkdir(topFolder, { recursive: true });
+    await writeFile(join(topFolder, "circuit.data"), saveFile);
+    console.log(`Wrote schematic to directory: ${join(outputPathRaw, topSaveId.toString())}`);
 
   } catch (error) {
     console.error(error instanceof Error ? error.stack ?? error.message : error);

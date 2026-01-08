@@ -1592,8 +1592,8 @@ export function buildNetlistFromYosys(
       continue;
     }
 
-    // Synchronous D-Flip-Flop with Enable ($sdffe)
-    if (cell.type === "$sdffe") {
+    // Synchronous D-Flip-Flop with Enable ($sdffe and $sdffce)
+    if (cell.type === "$sdffe" || cell.type === "$sdffce") {
       const width = parseParamInt(cell.parameters?.WIDTH);
       const size = resolveSize(width);
       const clkPol = parseParamInt(cell.parameters?.CLK_POLARITY);
@@ -1637,8 +1637,9 @@ export function buildNetlistFromYosys(
         srstWire = srstInv;
       }
 
+      const enPort = cell.connections["EN"] ? "EN" : "ENC";
       let enWire = normalizeBit(
-        ensureArray(cell.connections["EN"], "EN", 1)[0],
+        ensureArray(cell.connections[enPort], enPort, 1)[0],
         counter
       ).id;
       if (enPol === 0) {
