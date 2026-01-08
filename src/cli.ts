@@ -8,8 +8,8 @@ function printUsage(): void {
   console.error("Usage: verilog2tc --top <top_module> [--compact] [--no-flatten] <input.v> <output_folder>");
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+
+export async function runCli(args: string[]): Promise<void> {
   let top: string | undefined;
   let compact = false;
   let flatten = true;
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
 
   if (!top || paths.length !== 2) {
     printUsage();
-    process.exit(1);
+    throw new Error("Invalid arguments: expected --top <name> <input> <output>");
   }
 
   const [inputPathRaw, outputPathRaw] = paths;
@@ -140,18 +140,29 @@ async function main(): Promise<void> {
     );
     
     // outputPath/<moduleName>/circuit.data
+    // Wait, with CLI using specific output path for "Generate Benchmarks" script, we might need flexibility.
+    // The current CLI implementation takes <output_folder> and writes result INSIDE <output_folder>/<topModule>/circuit.data.
+    // If I want to exactly match generate_benchmarks expectation, I should verify CLI behavior.
+    
+    // Re-checking CLI behavior:
+    // It takes "output_folder".
+    // It creates "output_folder/dependencies/..."
+    // It creates "output_folder/<TopModuleName>/circuit.data"
+    // So if I call cli with "test_output/MyBench", it creates "test_output/MyBench/TopMod/circuit.data".
+    
+    // But generate_benchmarks usually creates "test_output/MyBench/circuit.data" (if only top) or structure.
+    
     const topFolder = join(outputPath, topModuleName);
     await mkdir(topFolder, { recursive: true });
     await writeFile(join(topFolder, "circuit.data"), saveFile);
     console.log(`Wrote schematic to directory: ${join(outputPathRaw, topModuleName)}`);
 
   } catch (error) {
-    console.error(error instanceof Error ? error.stack ?? error.message : error);
-    process.exit(1);
+     throw error;
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exit(1);
-});
+async function main(): Promise<void> {
+  await runCli(process.argv.slice(2));
+}
+

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join, resolve, parse } from "node:path";
-import { convertVerilogToSave, ConvertOptions } from "../src/index.js";
+import { runCli } from "../src/cli.js";
 
 interface Benchmark {
   name: string;
@@ -57,71 +57,8 @@ async function loadBenchmarks(): Promise<Benchmark[]> {
   return benchmarks.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Helper to identify modules
-function parseModules(
-  content: string
-): { name: string; body: string; customId?: bigint }[] {
-  const modules: { name: string; body: string; customId?: bigint }[] = [];
-  // Regex to match module declaration block. Simplified: matches "module name()...endmodule"
-  const moduleRegex = /module\s+(\w+)\s*[\s\S]*?;([\s\S]*?)endmodule/g;
-  let match;
-  while ((match = moduleRegex.exec(content)) !== null) {
-    const name = match[1];
-    const body = match[2];
-    const fullText = match[0];
-
-    let customId: bigint | undefined;
-    // Search for parameter CUSTOM_ID = 64'd... or numbers
-    // Search in fullText to support ANSI style parameter ports
-    const paramMatch =
-      fullText.match(/parameter\s+CUSTOM_ID\s*=\s*(?:64'd)?(\d+)/) ||
-      fullText.match(/parameter\s+CUSTOM_ID\s*=\s*([0-9]+)/);
-    if (paramMatch) {
-      customId = BigInt(paramMatch[1]);
-    }
-
-    modules.push({ name, body: fullText, customId });
-  }
-  return modules;
-}
-
-function createBlackbox(moduleName: string, originalBody: string): string {
-  // Keep port definition, empty body, add blackbox attribute
-  // Extract header "module name(...);"
-  const headerMatch = originalBody.match(/module\s+\w+\s*\(.*?\)\s*;/s);
-  if (!headerMatch) return originalBody; // Fallback
-
-  // We retain parameters just in case, but usually for blackbox we just need ports.
-  // TC requires ports to match.
-  // If we replace body with empty, Yosys sees it as empty module.
-  // To identify it as a "known" component to preserve hierarchy,
-  // `(* blackbox *)` is useful but `verilogToTc` logic with `flatten` usually ignores attributes unless we change Yosys script.
-  // BUT, if we modify `verilogToTc` Yosys script logic to `hierarchy -check -top ...` it still processes down.
-  // The key is: we want `adapter` to see an INSTANCE of `moduleName`.
-  // If the module is empty (assigns removed), `flatten` keeps the empty module instantiated?
-  // No, `flatten` usually dissolves hierarchy.
-  // We need `(* blackbox *)`.
-
-  return `(* blackbox *) ${headerMatch[0]} endmodule`;
-}
-
-// Helper to hash string to bigint (63-bit FNV-1a-like)
-// We use 63-bit to ensure the ID is interpreted as a positive number by Godot's signed 64-bit integers.
-// If we used 64-bit, the MSB might be interpreted as a sign bit, causing a mismatch between
-// the folder name (JS BigInt.toString() is unsigned) and the in-game ID (signed).
-function hashStringId(str: string): bigint {
-  let hash = 0xcbf29ce484222325n;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= BigInt(str.charCodeAt(i));
-    hash *= 0x100000001b3n;
-    hash &= 0xffffffffffffffffn;
-  }
-  return hash & 0x7fffffffffffffffn;
-}
-
 async function main() {
   const args = process.argv.slice(2);
-  const splitMode = args.includes("--split");
   const filter = args.find((a) => !a.startsWith("--"));
 
   const allBenchmarks = await loadBenchmarks();
@@ -139,110 +76,34 @@ async function main() {
   }
 
   const outputBase = resolve("test_output");
-
-  // Clean output directory for filtered run? Or just overwrite.
-  // try {
-  //   if (!filter) await fs.rm(outputBase, { recursive: true, force: true });
-  // } catch (e) {}
   await fs.mkdir(outputBase, { recursive: true });
 
   console.log(`Generating ${targets.length} benchmarks...`);
 
   for (const bench of targets) {
     const folder = join(outputBase, bench.name);
-    await fs.mkdir(folder, { recursive: true });
-
+    // runCli expects: --top <top> [--compact] [--no-flatten] <input> <output>
+    // But we don't have an input file on disk for some benchmarks (in-memory content? Wait, loadBenchmarks reads files.)
+    // loadBenchmarks reads content. But CLI reads file from disk.
+    // We should point CLI to the benchmark file: scripts/benchmarks/<file>
+    
+    // We need the original filename. loadBenchmarks parses it from directory traversal.
+    // But loadBenchmarks returns 'name' (filename without extension).
+    // Let's assume we can reconstruct path or pass it.
+    // Actually, passing content to CLI is not supported. CLI reads file.
+    // We can just call CLI with the path.
+    const benchPath = join("scripts/benchmarks", `${bench.name}.v`);
+    
     console.log(`Processing ${bench.name}...`);
     try {
-      const modules = parseModules(bench.verilog);
-      // Identify custom modules (dep) and top module
-      // If bench.top is specified, us it. Else use bench.name.
-      // If multiple modules, we assume modules WITH CUSTOM_ID are deps.
-
-      const deps = modules.filter((m) => m.customId !== undefined);
-
-      const doSplit = splitMode && deps.length > 0;
-
-      let topOutputDir = folder;
-      if (doSplit) {
-        topOutputDir = join(folder, "top");
-      }
-      await fs.mkdir(topOutputDir, { recursive: true });
-
-      // 1. Build Dependencies
-      if (doSplit) {
-        const depsBaseFolder = join(folder, "dependencies");
-
-        for (const dep of deps) {
-          const depFolder = join(depsBaseFolder, dep.name);
-          await fs.mkdir(depFolder, { recursive: true });
-
-          console.log(`  -> Building Submodule ${dep.name}`);
-
-          // Isolate the source for the dependency to avoid Yosys confusion with other modules
-          const depSource = dep.body; // Assuming parsing captured full module text correctly
-
-          // We compile the submodule using the Full Verilog content, picking it as TOP.
-          const depResult = await convertVerilogToSave(
-            { "bench.v": depSource },
-            {
-              topModule: dep.name,
-              description: `Submodule: ${dep.name}`,
-              debug: true,
-              compact: bench.compact,
-              saveId: hashStringId(dep.name), // Ensure saveId is consistent with module name
-            }
-          );
-          await fs.writeFile(
-            join(depFolder, "circuit.data"),
-            depResult.saveFile
-          );
-        }
-      }
-
-      // 2. Build Top
-      // If we have deps, we should modify the verilog passed to Top build
-      // so that deps are blackboxed to prevent flattening logic from optimizing them away
-      let topVerilog = bench.verilog;
-      if (!bench.flatten) {
-        for (const dep of deps) {
-          topVerilog = topVerilog.replace(
-            dep.body,
-            createBlackbox(dep.name, dep.body)
-          );
-        }
-      }
-
-      const topOutputPath = join(topOutputDir, `${bench.top}.v`);
-      await fs.writeFile(topOutputPath, topVerilog, "utf-8");
-
-      const result = await convertVerilogToSave(
-        { "bench.v": topVerilog },
-        {
-          topModule: bench.top,
-          description: `Benchmark: ${bench.name}`,
-          debug: true,
-          compact: bench.compact,
-          flatten: bench.flatten,
-        }
-      );
-
-      await fs.writeFile(join(topOutputDir, "circuit.data"), result.saveFile);
-      if (result.debugInfo) {
-        await fs.writeFile(
-          join(topOutputDir, "layout.json"),
-          JSON.stringify(result.debugInfo.layoutJson, null, 2)
-        );
-        await fs.writeFile(
-          join(topOutputDir, "yosys.json"),
-          JSON.stringify(result.debugInfo.yosysJson, null, 2)
-        );
-      }
-      console.log(`  -> OK`);
-    } catch (e: any) {
-      console.error(`  -> Failed: ${e}`);
-      if (e.stdout) console.log("STDOUT:", e.stdout.toString());
-      if (e.stderr) console.error("STDERR:", e.stderr.toString());
+        const cliArgs = ["--top", bench.top, benchPath, folder];
+        if (bench.compact) cliArgs.push("--compact");
+        if (!bench.flatten) cliArgs.push("--no-flatten");
+        
+        await runCli(cliArgs);
+        console.log(`  -> OK`);
+    } catch(e) {
+        console.error(`  -> Failed: ${e}`);
     }
   }
 }
