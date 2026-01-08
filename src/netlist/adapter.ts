@@ -284,6 +284,52 @@ function parseParamInt(val: string | number | undefined): number {
   return 0;
 }
 
+function resolveSplitterSource(
+  bitId: NetBitId,
+  nets: Map<NetBitId, NetBit>,
+  components: ComponentInstance[]
+): { componentId: string; templateId: string; index: number } | null {
+  const driver = nets.get(bitId)?.source;
+  if (!driver) return null;
+  const comp = components.find((c) => c.id === driver.componentId);
+  if (!comp) return null;
+
+  if (comp.template.id.startsWith("SPLITTER_")) {
+    const size = parseInt(comp.template.id.split("_")[1]);
+    if (!driver.portId.startsWith("out")) return null;
+    const portIndex = parseInt(driver.portId.replace("out", ""));
+
+    // For leaf splitters (size <= 8), try to trace up to a parent splitter
+    // This allows optimizing e.g. 32-bit bus -> Splitter32 -> Splitter8 -> bits -> re-packed 32-bit bus
+    if (size <= 8) {
+      const inputNetId = comp.connections["in"];
+      if (inputNetId) {
+        // Recursive call to see if the input bus comes from another splitter
+        // Note: passing the bus ID as bitId works because nets map stores both
+        const parentRes = resolveSplitterSource(inputNetId, nets, components);
+        // Only consider it a parent if it is larger (hierarchical)
+        if (
+          parentRes &&
+          parentRes.templateId.startsWith("SPLITTER_") &&
+          parseInt(parentRes.templateId.split("_")[1]) > size
+        ) {
+          return {
+            componentId: parentRes.componentId,
+            templateId: parentRes.templateId,
+            index: parentRes.index * 8 + portIndex,
+          };
+        }
+      }
+    }
+    return {
+      componentId: comp.id,
+      templateId: comp.template.id,
+      index: portIndex,
+    };
+  }
+  return null;
+}
+
 // Optimization: Pack loose bits into a bus
 function packBits(
   bits: Array<{ id: NetBitId; constant?: 0 | 1 }>,
@@ -298,34 +344,100 @@ function packBits(
   }
 
   // 1. Check if these bits come from a Splitter of compatible size/alignment
-  // We check the driver of the first bit.
-  const firstDriver = nets.get(bits[0].id)?.source;
-  if (firstDriver) {
-    const driverComp = components.find((c) => c.id === firstDriver.componentId);
-    if (driverComp && driverComp.template.id.startsWith("SPLITTER_")) {
-      // Check if ALL bits come from this splitter in order
-      const splitterSize = parseInt(driverComp.template.id.split("_")[1]);
-      // Only optimize if sizes match (or logic allows masking). For simplicity, exact match.
-      if (splitterSize === targetSize && bits.length <= targetSize) {
-        // Only optimize if splitter outputs 1-bit pins (size <= 8)
-        if (targetSize <= 8) {
-          let allMatch = true;
-          for (let i = 0; i < bits.length; i++) {
-            const d = nets.get(bits[i].id)?.source;
-            if (
-              !d ||
-              d.componentId !== firstDriver.componentId ||
-              d.portId !== `out${i}`
-            ) {
-              allMatch = false;
-              break;
-            }
-          }
-          if (allMatch) {
-            const busNetId = driverComp.connections["in"];
-            if (busNetId) return busNetId;
-          }
+  // Supports masking via AND/CONST if some bits are zeroed
+  if ([8, 16, 32, 64].includes(targetSize)) {
+    let sourceRef: { componentId: string; index: number } | null = null;
+    
+    // Find a candidate source splitter from first non-constant bit
+    for (const bit of bits) {
+      if (bit.constant === undefined) {
+        const ref = resolveSplitterSource(bit.id, nets, components);
+        if (
+          ref &&
+          ref.templateId === `SPLITTER_${targetSize}`
+        ) {
+          sourceRef = ref;
         }
+        break; // Found first non-const source or failed
+      }
+    }
+
+    if (sourceRef) {
+      let mask = 0n;
+      let valid = true;
+      const sourceId = sourceRef.componentId;
+
+      for (let i = 0; i < targetSize; i++) {
+        let bitIsSet = false;
+        
+        // Bit logic
+        if (i < bits.length) {
+          const bit = bits[i];
+          if (bit.constant === 0) {
+             // Zero is consistent with masking 0
+          } else if (bit.constant === 1) {
+             valid = false; break; // Cannot force 1 with AND
+          } else {
+             // Must match source
+             const ref = resolveSplitterSource(bit.id, nets, components);
+             if (ref && ref.componentId === sourceId && ref.index === i) {
+               bitIsSet = true;
+             } else {
+               valid = false; break;
+             }
+          }
+        } else {
+           // Padding is zero -> consistent
+        }
+
+        if (bitIsSet) {
+          mask |= 1n << BigInt(i);
+        }
+      }
+
+      if (valid) {
+         const splitterComp = components.find(c => c.id === sourceId);
+         if (splitterComp) {
+            const inputBus = splitterComp.connections["in"];
+            const fullMask = (1n << BigInt(targetSize)) - 1n;
+            
+            // Optimization: If mask is all 1s, it's a direct wire (Identity)
+            if (mask === fullMask) {
+               return inputBus;
+            }
+
+            // Optimization: Use AND gate for masking
+            const andId = idGen.next();
+            // @ts-ignore
+            const andTemplate = GATES_AND[targetSize]; 
+            const andInst = instantiate(getTemplate(andTemplate), andId);
+            components.push(andInst);
+
+            // Create Constant Mask
+            const constId = idGen.next();
+            const constTemplate = `CONST_${targetSize}`;
+            const constInst = instantiate(getTemplate(constTemplate), constId);
+            if (!constInst.metadata) constInst.metadata = {};
+            constInst.metadata.setting1 = mask;
+            components.push(constInst);
+            
+            // Connect
+            const maskBus = `${constId}_val`;
+            constInst.connections["out"] = maskBus;
+            registerSource(nets, maskBus, { componentId: constId, portId: "out" });
+
+            andInst.connections["A"] = inputBus;
+            registerSink(nets, inputBus, { componentId: andId, portId: "A" });
+
+            andInst.connections["B"] = maskBus;
+            registerSink(nets, maskBus, { componentId: andId, portId: "B" });
+
+            const outBus = `${andId}_val`;
+            andInst.connections["Y"] = outBus;
+            registerSource(nets, outBus, { componentId: andId, portId: "Y" });
+            
+            return outBus;
+         }
       }
     }
   }
