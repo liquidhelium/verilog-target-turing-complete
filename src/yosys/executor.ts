@@ -19,24 +19,7 @@ export class DefaultYosysBackend implements YosysBackend {
     const args = ["-q", "-p", request.script];
     const stdoutChunks: Uint8Array[] = [];
     const stderrChunks: Uint8Array[] = [];
-    const output = (await runYosys(args, files, {
-      stdout: (chunk) => {
-        if (chunk) stdoutChunks.push(chunk);
-      },
-      stderr: (chunk) => {
-        if (chunk) stderrChunks.push(chunk);
-      },
-    })) as YosysTree | undefined;
-    const resultFiles: Record<string, Uint8Array> = {};
-    for (const [name, value] of Object.entries(output ?? {})) {
-      if (typeof value === "string") {
-        resultFiles[name] = new TextEncoder().encode(value);
-      } else if (value instanceof Uint8Array) {
-        resultFiles[name] = value;
-      } else if (!isYosysTree(value)) {
-        continue;
-      }
-    }
+
     const decoder = new TextDecoder();
     const concat = (chunks: Uint8Array[]): string => {
       if (chunks.length === 0) return "";
@@ -50,6 +33,31 @@ export class DefaultYosysBackend implements YosysBackend {
       return decoder.decode(merged);
     };
 
-    return { stdout: concat(stdoutChunks), stderr: concat(stderrChunks), exitCode: 0, files: resultFiles };
+    try {
+      const output = (await runYosys(args, files, {
+        stdout: (chunk) => {
+          if (chunk) stdoutChunks.push(chunk);
+        },
+        stderr: (chunk) => {
+          if (chunk) stderrChunks.push(chunk);
+        },
+      })) as YosysTree | undefined;
+      const resultFiles: Record<string, Uint8Array> = {};
+      for (const [name, value] of Object.entries(output ?? {})) {
+        if (typeof value === "string") {
+          resultFiles[name] = new TextEncoder().encode(value);
+        } else if (value instanceof Uint8Array) {
+          resultFiles[name] = value;
+        } else if (!isYosysTree(value)) {
+          continue;
+        }
+      }
+      return { stdout: concat(stdoutChunks), stderr: concat(stderrChunks), exitCode: 0, files: resultFiles };
+    } catch (e: any) {
+        const stdout = concat(stdoutChunks);
+        const stderr = concat(stderrChunks);
+        e.message += `\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`;
+        throw e;
+    }
   }
 }

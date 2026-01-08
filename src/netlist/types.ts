@@ -34,4 +34,6 @@ export interface ComponentMetadata extends Record<string, unknown> {
   label?: string;
   modulePort?: ModulePortMeta;
   setting1?: bigint;
+  customId?: bigint;
+  portWidths?: Record<string, number>;
 }

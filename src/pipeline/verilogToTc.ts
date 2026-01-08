@@ -307,6 +307,7 @@ function toTcComponents(layout: LayoutResult, netlist: NetlistGraph): TCComponen
       setting1: typeof component.metadata?.setting1 === "bigint" ? component.metadata.setting1 : 0n,
       setting2: 0n,
       uiOrder: 0,
+      customId: typeof component.metadata?.customId === "bigint" ? component.metadata.customId : undefined,
       customDisplacement: { x: 0, y: 0 },
       selectedPrograms: [],
     };
@@ -362,6 +363,10 @@ function findPortPosition(
 }
 
 function getPortWidth(component: ComponentInstance, portId: string): number {
+  if (component.metadata?.portWidths && typeof component.metadata.portWidths[portId] === "number") {
+    return component.metadata.portWidths[portId];
+  }
+
   const match = component.template.id.match(/_(\d+)$/);
   if (!match) return 1;
   const size = parseInt(match[1], 10);
@@ -436,10 +441,20 @@ function createPayload(layout: LayoutResult, netlist: NetlistGraph, description?
       body: wireData.body,
     },
   }));
+
+  const dependenciesSet = new Set<bigint>();
+  for (const c of components) {
+    if (c.kind === ComponentKind.Custom && c.customId !== undefined) {
+      dependenciesSet.add(c.customId);
+    }
+  }
+  const dependencies = Array.from(dependenciesSet);
+
   const payload = defaultSavePayload({
     description: description ?? "Generated from Verilog",
     components,
     wires,
+    dependencies,
   });
   return payload;
 }

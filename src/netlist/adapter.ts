@@ -2,6 +2,9 @@ import {
   CONST_0,
   CONST_1,
   ComponentTemplate,
+  ComponentKind,
+  ComponentPort,
+  ComponentRotation,
   AND_1,
   INPUT_1,
   NOT_1,
@@ -9,6 +12,7 @@ import {
   OUTPUT_1,
   XOR_1,
   XNOR_1,
+  CUSTOM_GENERIC,
   getTemplate,
 } from "../tc/componentLibrary.js";
 import {
@@ -27,6 +31,7 @@ interface YosysPort {
 interface YosysCell {
   type: string;
   connections: Record<string, Array<number | string>>;
+  port_directions?: Record<string, "input" | "output">;
   parameters?: Record<string, string | number>;
 }
 
@@ -983,6 +988,209 @@ export function buildNetlistFromYosys(
         idGen
       );
 
+      continue;
+    }
+
+    // Asynchronous D-Flip-Flop ($adff)
+    // NOTE: TC Registers are synchronous. We map ARST to a synchronous reset mux.
+    if (cell.type === "$adff") {
+      const width = parseParamInt(cell.parameters?.WIDTH);
+      const size = resolveSize(width);
+      const clkPol = parseParamInt(cell.parameters?.CLK_POLARITY);
+      const arstPol = parseParamInt(cell.parameters?.ARST_POLARITY);
+      const arstVal = BigInt(
+        "0b" + ((cell.parameters?.ARST_VALUE as any) ?? "0")
+      );
+
+      const instanceId = cellName;
+
+      // 1. CLK Processing
+      let clkWire = normalizeBit(
+        ensureArray(cell.connections["CLK"], "CLK", 1)[0],
+        counter
+      ).id;
+      if (clkPol === 0) {
+        // Invert Clock
+        const notId = `${instanceId}_clk_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = clkWire;
+        registerSink(nets, clkWire, { componentId: notId, portId: "A" });
+
+        const clkInv = `${instanceId}_clk_inv`;
+        notInst.connections["Y"] = clkInv;
+        registerSource(nets, clkInv, { componentId: notId, portId: "Y" });
+        clkWire = clkInv;
+      }
+
+      // 2. ARST Processing (Mux Select)
+      let arstWire = normalizeBit(
+        ensureArray(cell.connections["ARST"], "ARST", 1)[0],
+        counter
+      ).id;
+      if (arstPol === 0) {
+        // Invert ARST
+        const notId = `${instanceId}_arst_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: notId, portId: "A" });
+
+        const arstInv = `${instanceId}_arst_inv`;
+        notInst.connections["Y"] = arstInv;
+        registerSource(nets, arstInv, { componentId: notId, portId: "Y" });
+        arstWire = arstInv;
+      }
+
+      // 3. Data Inputs (D)
+      const dRaw = ensureArray(cell.connections["D"], "D");
+      const dPacked = packBits(
+        dRaw.map((b) => normalizeBit(b, counter)),
+        size,
+        components,
+        nets,
+        idGen
+      );
+
+      // Create Constant for Reset Value
+      let rstBusId: string;
+      if (size === 1) {
+        const val = Number(arstVal) & 1;
+        const constId = `${instanceId}_rst_val`;
+        const tplId = val === 1 ? "CONST_1" : "CONST_0";
+        const constInst = instantiate(getTemplate(tplId), constId);
+        components.push(constInst);
+        rstBusId = `${constId}_out`;
+        constInst.connections["out"] = rstBusId;
+        registerSource(nets, rstBusId, { componentId: constId, portId: "out" });
+      } else {
+        const constId = `${instanceId}_rst_val`;
+        const constTemplate = getTemplate(`CONST_${size}`);
+        const constInst = instantiate(constTemplate, constId);
+        if (!constInst.metadata) constInst.metadata = {};
+        constInst.metadata.setting1 = arstVal;
+        components.push(constInst);
+        rstBusId = `${instanceId}_rst_val_out`;
+        constInst.connections["out"] = rstBusId;
+        registerSource(nets, rstBusId, { componentId: constId, portId: "out" });
+      }
+
+      const regId = `${instanceId}_reg`;
+      const regOut = `${instanceId}_reg_out`;
+
+      // 4. Mux for Next State vs Reset
+      let muxOut: string;
+      if (size === 1) {
+        // Mux 1 logic: Y = S ? B : A. S=ARST, B=RstVal, A=D
+        
+        // Invert S
+        const notSId = `${instanceId}_mux_notS`;
+        const notS = instantiate(getTemplate("NOT_1"), notSId);
+        components.push(notS);
+        notS.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: notSId, portId: "A" });
+        const notSWire = `${notSId}_out`;
+        notS.connections["Y"] = notSWire;
+        registerSource(nets, notSWire, { componentId: notSId, portId: "Y" });
+
+        // Term 1: ~S & A (D)
+        const and1Id = `${instanceId}_mux_term1`;
+        const and1 = instantiate(getTemplate("AND_1"), and1Id);
+        components.push(and1);
+        and1.connections["A"] = notSWire;
+        registerSink(nets, notSWire, { componentId: and1Id, portId: "A" });
+        and1.connections["B"] = dPacked;
+        registerSink(nets, dPacked, { componentId: and1Id, portId: "B" });
+        const term1Wire = `${and1Id}_out`;
+        and1.connections["Y"] = term1Wire;
+        registerSource(nets, term1Wire, { componentId: and1Id, portId: "Y" });
+
+        // Term 2: S & B (RstVal)
+        const and2Id = `${instanceId}_mux_term2`;
+        const and2 = instantiate(getTemplate("AND_1"), and2Id);
+        components.push(and2);
+        and2.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: and2Id, portId: "A" });
+        and2.connections["B"] = rstBusId;
+        registerSink(nets, rstBusId, { componentId: and2Id, portId: "B" });
+        const term2Wire = `${and2Id}_out`;
+        and2.connections["Y"] = term2Wire;
+        registerSource(nets, term2Wire, { componentId: and2Id, portId: "Y" });
+
+        // Term1 | Term2
+        const orId = `${instanceId}_mux_or`;
+        const orInst = instantiate(getTemplate("OR_1"), orId);
+        components.push(orInst);
+        orInst.connections["A"] = term1Wire;
+        registerSink(nets, term1Wire, { componentId: orId, portId: "A" });
+        orInst.connections["B"] = term2Wire;
+        registerSink(nets, term2Wire, { componentId: orId, portId: "B" });
+        
+        muxOut = `${orId}_out`;
+        orInst.connections["Y"] = muxOut;
+        registerSource(nets, muxOut, { componentId: orId, portId: "Y" });
+      } else {
+        // Use Standard MUX Component
+        const muxId = `${instanceId}_mux`;
+        const muxTemplate = getTemplate(`MUX_${size}`);
+        const muxInst = instantiate(muxTemplate, muxId);
+        components.push(muxInst);
+
+        muxInst.connections["S"] = arstWire;
+        registerSink(nets, arstWire, { componentId: muxId, portId: "S" });
+
+        // If Select=1, Use B. Here Select=ARST -> Use B=RstVal
+        muxInst.connections["B"] = rstBusId;
+        registerSink(nets, rstBusId, { componentId: muxId, portId: "B" });
+        
+        muxInst.connections["A"] = dPacked;
+        registerSink(nets, dPacked, { componentId: muxId, portId: "A" });
+
+        muxOut = `${muxId}_out`;
+        muxInst.connections["Y"] = muxOut;
+        registerSource(nets, muxOut, { componentId: muxId, portId: "Y" });
+      }
+
+      // Register
+      const regTemplate = getTemplate(`REG_${size}`);
+      const regInst = instantiate(regTemplate, regId);
+      components.push(regInst);
+
+      regInst.connections["value"] = muxOut;
+      registerSink(nets, muxOut, { componentId: regId, portId: "value" });
+
+      regInst.connections["save"] = clkWire;
+      registerSink(nets, clkWire, { componentId: regId, portId: "save" });
+
+      // Load Tie-1 for >1 bit
+       if (size > 1) {
+        const loadConstId = `${instanceId}_load_const`;
+        const loadInst = instantiate(getTemplate("CONST_1"), loadConstId);
+        components.push(loadInst);
+        const loadWire = `${loadConstId}_out`;
+        loadInst.connections["out"] = loadWire;
+        registerSource(nets, loadWire, {
+          componentId: loadConstId,
+          portId: "out",
+        });
+
+        regInst.connections["load"] = loadWire;
+        registerSink(nets, loadWire, { componentId: regId, portId: "load" });
+      }
+
+      regInst.connections["out"] = regOut;
+      registerSource(nets, regOut, { componentId: regId, portId: "out" });
+
+      // Connect Q
+      const qRaw = ensureArray(cell.connections["Q"], "Q");
+      unpackBits(
+        regOut,
+        qRaw.map((b) => normalizeBit(b, counter)),
+        size,
+        components,
+        nets,
+        idGen
+      );
       continue;
     }
 
@@ -2775,8 +2983,103 @@ export function buildNetlistFromYosys(
     }
 
     const binding = CELL_LIBRARY[cell.type];
+    
+    // Dynamic Custom Component Detection
+    if (!binding && cell.parameters?.CUSTOM_ID) {
+        let customIdVal: bigint | undefined;
+        const val = cell.parameters.CUSTOM_ID;
+        if (typeof val === "string") {
+            if (/^[01]+$/.test(val) && val.length > 20) { // Simple heuristic for binary strings vs decimal
+                 customIdVal = BigInt("0b" + val);
+            } else {
+                 customIdVal = BigInt(val);
+            }
+        } else if (typeof val === "number") {
+            customIdVal = BigInt(val);
+        }
+
+        if (customIdVal !== undefined) {
+             const ports: ComponentPort[] = [];
+             let inputCount = 0;
+             let outputCount = 0;
+             const dirs = cell.port_directions || {};
+             const portWidths: Record<string, number> = {};
+             
+             for (const [pName, dir] of Object.entries(dirs)) {
+                 const bits = cell.connections[pName] || [];
+                 portWidths[pName] = bits.length;
+
+                 if (dir === "input") {
+                     ports.push({ 
+                        id: pName, 
+                        direction: "in", 
+                        position: { x: -2, y: inputCount } 
+                     });
+                     inputCount += 2; // Spacing
+                 } else if (dir === "output") {
+                     ports.push({ 
+                        id: pName, 
+                        direction: "out", 
+                        position: { x: 2, y: outputCount } 
+                     });
+                     outputCount += 2;
+                 }
+             }
+             
+             // Create Template
+             const dynamicTemplate: ComponentTemplate = {
+                 id: `CUSTOM_${cell.type}`,
+                 name: "Custom",
+                 kind: ComponentKind.Custom,
+                 rotation: ComponentRotation.Rot0,
+                 ports: ports,
+                 bounds: { 
+                    minX: -2, maxX: 2, 
+                    minY: 0, maxY: Math.max(inputCount, outputCount) 
+                 }
+             };
+
+             const instance = instantiate(dynamicTemplate, cellName);
+             instance.metadata = { customId: customIdVal, label: cell.type, portWidths };
+             components.push(instance);
+             
+             // Connect ports
+             for (const [pName, dir] of Object.entries(dirs)) {
+                 const bits = ensureArray(cell.connections[pName], pName);
+                 const width = bits.length;
+                 const normBits = bits.map(b => normalizeBit(b, counter));
+
+                 if (dir === "input") {
+                     const busId = packBits(normBits, width, components, nets, idGen);
+                     instance.connections[pName] = busId;
+                     registerSink(nets, busId, { componentId: cellName, portId: pName });
+                 } else {
+                     const busId = `${cellName}_${pName}`;
+                     instance.connections[pName] = busId;
+                     registerSource(nets, busId, { componentId: cellName, portId: pName });
+                     unpackBits(busId, normBits, width, components, nets, idGen);
+                 }
+             }
+             continue;
+        }
+    }
+
     if (!binding) {
       throw new Error(`Unsupported cell type ${cell.type}`);
+    }
+
+    let customIdVal: bigint | undefined;
+    if (binding.template === CUSTOM_GENERIC) {
+        const val = cell.parameters?.CUSTOM_ID;
+        if (typeof val === "string") {
+            if (/^[01]+$/.test(val)) {
+                customIdVal = BigInt("0b" + val);
+            } else {
+                customIdVal = BigInt(val);
+            }
+        } else if (typeof val === "number") {
+            customIdVal = BigInt(val);
+        }
     }
 
     // Determine width from first output port (or Input if no output?)
@@ -3008,13 +3311,23 @@ export function buildNetlistFromYosys(
       }
     } else {
       // Multi-bit Standard Gate
-      const tplSpec = binding.template as SizeMap;
-      const tplId = tplSpec[size];
-      if (!tplId)
-        throw new Error(`No template for size ${size} for ${cell.type}`);
+      let tpl: ComponentTemplate;
+      if (typeof binding.template === "object" && "kind" in binding.template) {
+         tpl = binding.template as ComponentTemplate;
+      } else {
+         const tplSpec = binding.template as SizeMap;
+         const tplId = tplSpec[size];
+         if (!tplId)
+           throw new Error(`No template for size ${size} for ${cell.type}`);
+         tpl = getTemplate(tplId);
+      }
 
       const instanceId = cellName;
-      const instance = instantiate(getTemplate(tplId), instanceId);
+      const instance = instantiate(tpl, instanceId);
+      if (customIdVal !== undefined) {
+         instance.metadata = instance.metadata || {};
+         instance.metadata.customId = customIdVal;
+      }
       components.push(instance);
 
       // Inputs (Pack)

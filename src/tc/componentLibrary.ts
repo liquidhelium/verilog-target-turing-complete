@@ -1,4 +1,5 @@
 import { ComponentKind, ComponentRotation, TCPoint } from "./types.js";
+export { ComponentKind, ComponentRotation, TCPoint } from "./types.js";
 
 export type PortDirection = "in" | "out";
 
@@ -97,6 +98,19 @@ export const CONST_0 = register(
     ],
     { minX: 0, maxX: 2, minY: 0, maxY: 0 },
   ),
+);
+
+export const CUSTOM_GENERIC = register(
+  template(
+     "CUSTOM_GENERIC",
+     "Custom",
+     ComponentKind.Custom,
+     [
+       { id: "in", direction: "in", position: { x: -1, y: 0 } },
+       { id: "out", direction: "out", position: { x: 1, y: 0 } },
+     ],
+     { minX: -2, maxX: 2, minY: -1, maxY: 1 }
+  )
 );
 
 export const CONST_1 = register(
