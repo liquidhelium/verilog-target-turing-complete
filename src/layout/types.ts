@@ -68,6 +68,11 @@ export interface ElkRouterOptions {
   gridSize?: number;
   epsilon?: number;
   elk?: ElkFacade;
+  /**
+   * If true, ignores edge routing and packs components tightly while preserving relative order from ELK.
+   * Also disables edge output.
+   */
+  compact?: boolean;
 }
 
 export interface ElkFacade {

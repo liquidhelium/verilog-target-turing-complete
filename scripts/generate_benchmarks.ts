@@ -7,6 +7,7 @@ interface Benchmark {
   verilog: string;
   top: string;
   category: string;
+  compact: boolean;
 }
 
 async function loadBenchmarks(): Promise<Benchmark[]> {
@@ -23,18 +24,23 @@ async function loadBenchmarks(): Promise<Benchmark[]> {
             
             let top = name; 
             let category = "unknown";
+            let compact = false;
             
             const topMatch = content.match(/\/\/ @top:\s*(\w+)/);
             if (topMatch) top = topMatch[1];
             
             const catMatch = content.match(/\/\/ @category:\s*(\w+)/);
             if (catMatch) category = catMatch[1];
+
+            const compactMatch = content.match(/\/\/ @compact:\s*(true|false)/i);
+            if (compactMatch) compact = compactMatch[1].toLowerCase() === "true";
             
             benchmarks.push({
                 name,
                 verilog: content,
                 top,
-                category
+                category,
+                compact
             });
         }
     } catch (e) {
@@ -157,7 +163,8 @@ async function main() {
                 { 
                     topModule: dep.name, 
                     description: `Submodule: ${dep.name}`,
-                    debug: true 
+                    debug: true,
+                    compact: bench.compact
                 }
              );
              await fs.writeFile(join(depFolder, "circuit.data"), depResult.saveFile);
@@ -186,7 +193,8 @@ async function main() {
         { 
             topModule: bench.top, 
             description: `Benchmark: ${bench.name}`,
-            debug: true 
+            debug: true,
+            compact: bench.compact
         }
       );
       

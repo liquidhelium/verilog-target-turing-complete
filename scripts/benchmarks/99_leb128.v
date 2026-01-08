@@ -1,5 +1,6 @@
 // @top: pack_u32
 // @category: leb128
+// @compact: true
 
 module pack_u32 (
     input  wire [31:0] data_in,

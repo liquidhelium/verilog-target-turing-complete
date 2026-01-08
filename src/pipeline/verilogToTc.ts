@@ -5,7 +5,7 @@ import { NetlistGraph, ComponentInstance } from "../netlist/types.js";
 import { buildLayoutGraph } from "../layout/graphBuilder.js";
 import { ElkRouter } from "../layout/elkRouter.js";
 import { DefaultYosysBackend } from "../yosys/executor.js";
-import { TCSaveWriter, defaultSavePayload } from "../tc/saveWriter.js";
+import { TCSaveWriter, defaultSavePayload, createTeleportWire } from "../tc/saveWriter.js";
 import { ComponentKind, TCComponent, TCPoint, TCSavePayload, WireColor, WireKind } from "../tc/types.js";
 import { ComponentPort, CONST_0 } from "../tc/componentLibrary.js";
 import { LayoutResult } from "../layout/types.js";
@@ -59,6 +59,7 @@ export interface ConvertOptions {
   topModule: string;
   description?: string;
   debug?: boolean;
+  compact?: boolean;
 }
 
 export interface ConvertResult {
@@ -429,18 +430,47 @@ function wiresFromLayout(layout: LayoutResult, netlist: NetlistGraph): { start: 
   return result;
 }
 
-function createPayload(layout: LayoutResult, netlist: NetlistGraph, description?: string): TCSavePayload {
+function createPayload(
+  layout: LayoutResult,
+  netlist: NetlistGraph,
+  description?: string,
+  compact: boolean = false,
+): TCSavePayload {
   const components = toTcComponents(layout, netlist);
-  const wiresData = wiresFromLayout(layout, netlist);
-  const wires = wiresData.map((wireData) => ({
-    kind: wireData.kind,
-    color: WireColor.Default,
-    comment: "",
-    path: {
-      start: wireData.start,
-      body: wireData.body,
-    },
-  }));
+  const wires: TCSavePayload["wires"] = [];
+
+  if (compact) {
+    for (const net of netlist.nets.values()) {
+       if (!net.source) continue;
+       
+       const sourceComp = netlist.components.find(c => c.id === net.source!.componentId);
+       if (!sourceComp) continue;
+       const width = getPortWidth(sourceComp, net.source.portId);
+       
+       const kind = widthToWireKind(width);
+       
+       try {
+           const start = findPortPosition(layout, netlist, net.source.componentId, net.source.portId);
+           for (const sink of net.sinks) {
+               try {
+                   const end = findPortPosition(layout, netlist, sink.componentId, sink.portId);
+                   wires.push(createTeleportWire(start, end, kind, WireColor.Default));
+               } catch(e) {}
+           }
+       } catch(e) {}
+    }
+  } else {
+    const wiresData = wiresFromLayout(layout, netlist);
+    wires.push(...wiresData.map((wireData) => ({
+      kind: wireData.kind,
+      color: WireColor.Default,
+      comment: "",
+      path: {
+        start: wireData.start,
+        body: wireData.body,
+      },
+    })));
+  }
 
   const dependenciesSet = new Set<bigint>();
   for (const c of components) {
@@ -613,14 +643,16 @@ export async function convertVerilogToSave(
   const netlist = buildNetlistFromYosys(yosysJson, { topModule: options.topModule });
   optimizeNetlist(netlist);
   const layoutGraph = buildLayoutGraph(netlist);
-  const router = new ElkRouter({ gridSize: GRID_SIZE });
+  const router = new ElkRouter({ gridSize: GRID_SIZE, compact: options.compact });
   const layout = await router.route(layoutGraph);
   
-  alignIOComponents(layout, netlist);
+  if (!options.compact) {
+    alignIOComponents(layout, netlist);
+  }
 
   centerLayout(layout);
 
-  const payload = createPayload(layout, netlist, options.description);
+  const payload = createPayload(layout, netlist, options.description, options.compact);
   const writer = new TCSaveWriter(payload);
   const { saveFile, uncompressed } = await writer.build();
   return { 

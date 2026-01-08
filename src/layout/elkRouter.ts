@@ -24,10 +24,12 @@ export class ElkRouter {
   private readonly gridSize: number;
   private readonly epsilon: number;
   private readonly elkPromise: Promise<ElkFacade>;
+  private readonly compact: boolean;
 
   constructor(options: ElkRouterOptions = {}) {
     this.gridSize = options.gridSize ?? 8;
     this.epsilon = options.epsilon ?? 0.1;
+    this.compact = options.compact ?? false;
     this.elkPromise = options.elk
       ? Promise.resolve(options.elk)
       : loadElkFacade();
@@ -37,7 +39,106 @@ export class ElkRouter {
     const elk = await this.elkPromise;
     const elkGraph = this.toElkGraph(graph);
     const laidOut = await elk.layout(elkGraph);
+    if (this.compact) {
+      return this.compactLayout(laidOut);
+    }
     return this.fromElkGraph(laidOut);
+  }
+
+  private compactLayout(graph: ElkGraph): LayoutResult {
+    const nodes: LayoutNodePlacement[] = [];
+
+    for (const child of graph.children ?? []) {
+      if (child.x === undefined || child.y === undefined) {
+        continue;
+      }
+
+      const rawX = child.x / GRAPH_SCALE;
+      const rawY = child.y / GRAPH_SCALE;
+
+      const node: LayoutNodePlacement = {
+        id: child.id,
+        position: this.snapPoint({ x: rawX, y: rawY }),
+        width: child.width / GRAPH_SCALE,
+        height: child.height / GRAPH_SCALE,
+        ports: this.collectPortPlacements(child),
+        data: child.data,
+      };
+      (node as any)._rawX = rawX;
+      nodes.push(node);
+    }
+
+    nodes.sort((a, b) => (a as any)._rawX - (b as any)._rawX);
+
+    const columns: LayoutNodePlacement[][] = [];
+    if (nodes.length > 0) {
+      let currentCol = [nodes[0]];
+      for (let i = 1; i < nodes.length; i++) {
+        const node = nodes[i];
+        const prev = nodes[i - 1];
+        if ((node as any)._rawX > (prev as any)._rawX + 5.0) {
+          columns.push(currentCol);
+          currentCol = [];
+        }
+        currentCol.push(node);
+      }
+      columns.push(currentCol);
+    }
+
+    const GAP = 1;
+    let currentX = 0;
+
+    for (const col of columns) {
+      col.sort((a, b) => a.position.y - b.position.y);
+      let currentY = 0;
+      let colWidth = 0;
+      for (const node of col) {
+        colWidth = Math.max(colWidth, node.width);
+        this.shiftNode(node, currentX, currentY);
+        currentY += node.height + GAP;
+      }
+      currentX += colWidth + GAP;
+    }
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    if (nodes.length > 0) {
+      minX = nodes[0].position.x;
+      maxX = nodes[0].position.x + nodes[0].width;
+      minY = nodes[0].position.y;
+      maxY = nodes[0].position.y + nodes[0].height;
+
+      for (const node of nodes) {
+        minX = Math.min(minX, node.position.x);
+        minY = Math.min(minY, node.position.y);
+        maxX = Math.max(maxX, node.position.x + node.width);
+        maxY = Math.max(maxY, node.position.y + node.height);
+      }
+
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+
+      for (const node of nodes) {
+        this.shiftNode(
+          node,
+          Math.round(node.position.x - centerX),
+          Math.round(node.position.y - centerY)
+        );
+        delete (node as any)._rawX;
+      }
+    }
+
+    return { nodes, edges: [] };
+  }
+
+  private shiftNode(node: LayoutNodePlacement, x: number, y: number) {
+    const dx = x - node.position.x;
+    const dy = y - node.position.y;
+    node.position.x = x;
+    node.position.y = y;
+    for (const key in node.ports) {
+      node.ports[key].x += dx;
+      node.ports[key].y += dy;
+    }
   }
 
   private toElkGraph(graph: LayoutGraph): ElkGraph {
