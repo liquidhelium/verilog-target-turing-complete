@@ -1,4 +1,5 @@
 import type { ELK } from "elkjs";
+import { ComponentKind } from "../tc/types.js";
 import {
   ElkFacade,
   ElkGraph,
@@ -19,6 +20,45 @@ import {
 } from "./types.js";
 
 const GRAPH_SCALE = 10;
+
+const LAYOUT_INPUT_KINDS = new Set([
+  ComponentKind.Input1,
+  ComponentKind.Input8,
+  ComponentKind.Input16,
+  ComponentKind.Input32,
+  ComponentKind.Input64,
+  ComponentKind.LevelInput1,
+  ComponentKind.LevelInput8,
+  ComponentKind.LevelInput2Pin,
+  ComponentKind.LevelInput3Pin,
+  ComponentKind.LevelInput4Pin,
+  ComponentKind.LevelInputConditions,
+  ComponentKind.LevelInputCode,
+  ComponentKind.LevelInputArch,
+]);
+
+const LAYOUT_OUTPUT_KINDS = new Set([
+  ComponentKind.Output1,
+  ComponentKind.Output8,
+  ComponentKind.Output16,
+  ComponentKind.Output32,
+  ComponentKind.Output64,
+  ComponentKind.Output1z,
+  ComponentKind.Output8z,
+  ComponentKind.Output16z,
+  ComponentKind.Output32z,
+  ComponentKind.Output64z,
+  ComponentKind.LevelOutput1,
+  ComponentKind.LevelOutput8,
+  ComponentKind.LevelOutput1Sum,
+  ComponentKind.LevelOutput1Car,
+  ComponentKind.LevelOutput2Pin,
+  ComponentKind.LevelOutput3Pin,
+  ComponentKind.LevelOutput4Pin,
+  ComponentKind.LevelOutput8z,
+  ComponentKind.LevelOutputArch,
+  ComponentKind.LevelOutputCounter,
+]);
 
 export class ElkRouter {
   private readonly gridSize: number;
@@ -69,44 +109,90 @@ export class ElkRouter {
     }
 
     nodes.sort((a, b) => (a as any)._rawX - (b as any)._rawX);
-
-    // Calculate total area and target side length for a square approximation
-    const GAP = 1;
-    let totalArea = 0;
-    let maxNodeHeight = 0;
-    for (const node of nodes) {
-      // Area including gap spacing overhead
-      const w = node.width + GAP;
-      const h = node.height + GAP;
-      totalArea += w * h;
-      maxNodeHeight = Math.max(maxNodeHeight, h);
-    }
     
-    // Determine target height. 
-    // Usually H = Sqrt(Area). We ensure it's at least as tall as the tallest component.
-    const targetHeight = Math.max(Math.ceil(Math.sqrt(totalArea)), maxNodeHeight);
+    // Separate into Input, Logic, Output
+    const inputNodes: LayoutNodePlacement[] = [];
+    const logicNodes: LayoutNodePlacement[] = [];
+    const outputNodes: LayoutNodePlacement[] = [];
+
+    for (const node of nodes) {
+      if (node.data && typeof node.data.kind === 'number') {
+        const kind = node.data.kind as ComponentKind;
+        if (LAYOUT_INPUT_KINDS.has(kind)) {
+          inputNodes.push(node);
+          continue;
+        }
+        if (LAYOUT_OUTPUT_KINDS.has(kind)) {
+          outputNodes.push(node);
+          continue;
+        }
+      }
+      logicNodes.push(node);
+    }
+
+    // Reassemble: inputs -> logic -> outputs
+    // We process them as a single stream but they are now grouped.
+    // The previous sorting by rawX inside each group is strictly preserved?
+    // Yes, because `nodes` was sorted by rawX, and we pushed sequentially.
+    
+    // Logic for packing:
+    // Inputs: One column (or more if too tall)
+    // Logic: Packed in square
+    // Outputs: One column (or more if too tall)
+    
+    const GAP = 1;
+    const COL_GAP = 2; // Tighter column spacing
+    const IO_SLOT_HEIGHT = 10;
+
+    const getNodeHeight = (node: LayoutNodePlacement) => {
+        if (node.data && typeof node.data.kind === 'number') {
+            const kind = node.data.kind as ComponentKind;
+            if (LAYOUT_INPUT_KINDS.has(kind) || LAYOUT_OUTPUT_KINDS.has(kind)) {
+                return IO_SLOT_HEIGHT;
+            }
+        }
+        return node.height + GAP;
+    };
+
+    const logicArea = logicNodes.reduce((sum, n) => sum + (n.width + COL_GAP) * (n.height + GAP), 0);
+    let maxLogicHeight = 0;
+    for (const n of logicNodes) maxLogicHeight = Math.max(maxLogicHeight, n.height + GAP);
+    
+    // Target height based PRIMARILY on logic block squareness
+    // But constrained by input/output columns if they are huge?
+    // Let's aim for square logic block first.
+    let targetHeight = Math.max(Math.ceil(Math.sqrt(logicArea)), maxLogicHeight);
+    
+    // Ensure target height is at least as tall as the tallest single input/output column if possible?
+    // Or let inputs/outputs wrap if they exceed target height.
+    // Let's let them wrap.
 
     const columns: LayoutNodePlacement[][] = [];
-    let currentCol: LayoutNodePlacement[] = [];
-    let currentHeight = 0;
-    let maxColH = 0;
-
-    for (const node of nodes) {
-      if (currentCol.length > 0 && currentHeight + node.height + GAP > targetHeight) {
-          // If adding this node exceeds target height significantly 
-          // (check if just slightly over is ok? For now strict cut)
-          columns.push(currentCol);
-          currentCol = [];
-          currentHeight = 0;
-      }
-      currentCol.push(node);
-      currentHeight += node.height + GAP;
-      maxColH = Math.max(maxColH, currentHeight);
-    }
     
-    if (currentCol.length > 0) {
-      columns.push(currentCol);
-    }
+    const packToColumns = (list: LayoutNodePlacement[]) => {
+       let col: LayoutNodePlacement[] = [];
+       let h = 0;
+       for (const node of list) {
+         const nodeH = getNodeHeight(node);
+         if (col.length > 0 && h + nodeH > targetHeight) {
+            columns.push(col);
+            col = [];
+            h = 0;
+         }
+         col.push(node);
+         h += nodeH;
+       }
+       if (col.length > 0) columns.push(col);
+    };
+
+    packToColumns(inputNodes);
+    
+    // Force a new column for logic start if previous column wasn't empty? 
+    // packToColumns pushes the last partial column.
+    // So logic starts in a fresh column.
+    
+    packToColumns(logicNodes);
+    packToColumns(outputNodes);
 
     let currentX = 0;
 
@@ -128,10 +214,23 @@ export class ElkRouter {
       for (const node of col) {
         // Horizontally center in column
         const offsetX = Math.floor((colWidth - node.width) / 2);
-        this.shiftNode(node, currentX + offsetX, currentY);
-        currentY += node.height + GAP;
+        
+        // Calculate vertical position
+        const totalH = getNodeHeight(node);
+        let offsetY = 0;
+        
+        if (totalH === IO_SLOT_HEIGHT) {
+            // Center within the IO slot
+            offsetY = Math.floor((IO_SLOT_HEIGHT - node.height) / 2);
+        } else {
+            // Logic node
+            offsetY = 0;
+        }
+
+        this.shiftNode(node, currentX + offsetX, currentY + offsetY);
+        currentY += totalH;
       }
-      currentX += colWidth + GAP;
+      currentX += colWidth + COL_GAP;
     }
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;

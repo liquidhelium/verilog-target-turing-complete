@@ -89,6 +89,7 @@ function buildNode(component: ComponentInstance): { node: LayoutNode; portIndex:
     ports,
     data: {
       templateId: template.id,
+      kind: template.kind,
     },
     layoutOptions,
   };
