@@ -1,3 +1,6 @@
+// @top: test_custom
+// @category: test
+// @flatten: false
 module tc_custom_8_8  (
     input [7:0] in,
     output [7:0] out

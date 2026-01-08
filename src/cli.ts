@@ -89,10 +89,10 @@ async function main(): Promise<void> {
       await mkdir(depsFolder, { recursive: true });
 
       for (const dep of deps) {
-        const depFolder = join(depsFolder, dep.customId!.toString());
+        const depFolder = join(depsFolder, dep.name);
         await mkdir(depFolder, { recursive: true });
         
-        console.log(`Building Dependency: ${dep.name} (ID: ${dep.customId})`);
+        console.log(`Building Dependency: ${dep.name}`);
         
         const depResult = await convertVerilogToSave(
           { "dep.v": dep.body },
@@ -139,11 +139,11 @@ async function main(): Promise<void> {
       }, 
     );
     
-    // outputPath/<topSaveId>/circuit.data
-    const topFolder = join(outputPath, topSaveId.toString());
+    // outputPath/<moduleName>/circuit.data
+    const topFolder = join(outputPath, topModuleName);
     await mkdir(topFolder, { recursive: true });
     await writeFile(join(topFolder, "circuit.data"), saveFile);
-    console.log(`Wrote schematic to directory: ${join(outputPathRaw, topSaveId.toString())}`);
+    console.log(`Wrote schematic to directory: ${join(outputPathRaw, topModuleName)}`);
 
   } catch (error) {
     console.error(error instanceof Error ? error.stack ?? error.message : error);
