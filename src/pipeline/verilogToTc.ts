@@ -552,7 +552,29 @@ function optimizeNetlist(netlist: NetlistGraph) {
   }
 
   if (componentsToRemove.size > 0) {
+      // 1. Disconnect removed components from the nets that drive them (inputs)
+      for (const compId of componentsToRemove) {
+        const comp = componentMap.get(compId);
+        if (!comp) continue;
+        
+        for (const netId of Object.values(comp.connections)) {
+            if (typeof netId !== 'string') continue;
+            const net = netlist.nets.get(netId);
+            if (net) {
+                // Remove as sink
+                net.sinks = net.sinks.filter(s => s.componentId !== compId);
+                // Remove as source (just in case)
+                if (net.source?.componentId === compId) {
+                    net.source = undefined;
+                }
+            }
+        }
+      }
+
+      // 2. Remove components
       netlist.components = netlist.components.filter(c => !componentsToRemove.has(c.id));
+      
+      // 3. Remove nets marked for removal
       for (const netId of netsToRemove) {
           const net = netlist.nets.get(netId);
            if (net) {

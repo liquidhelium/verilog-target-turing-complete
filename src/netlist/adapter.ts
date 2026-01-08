@@ -262,7 +262,7 @@ function ensureDriverIfConstant(
   if (bitInfo.constant !== undefined) {
     if (nets.get(bitInfo.id)?.source) return;
 
-    const constId = `${destinationId}:${portName}:const`;
+    const constId = `${destinationId}_${portName}_const`;
     const constTemplate = bitInfo.constant === 0 ? CONST_0 : CONST_1;
     const constInstance = instantiate(constTemplate, constId);
     components.push(constInstance);
@@ -401,7 +401,7 @@ function packBits(
       ensureDriverIfConstant(bits[i], makerId, `in${i}`, components, nets);
     } else {
       bitId = `__pad_0_${makerId}_${i}`;
-      const constId = `${makerId}:pad:${i}`;
+      const constId = `${makerId}_pad_${i}`;
       const constInst = instantiate(CONST_0, constId);
       components.push(constInst);
       constInst.connections["out"] = bitId;
@@ -661,6 +661,12 @@ function cleanupRedundantComponents(
   return currentComponents;
 }
 
+function sanitizeId(id: string): string {
+  // ELK/elkjs graph import fails if node IDs contain dots or other special chars.
+  // We sanitize these IDs to be safe tokens.
+  return id.replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
 export function buildNetlistFromYosys(
   json: unknown,
   options: YosysAdapterOptions
@@ -681,8 +687,9 @@ export function buildNetlistFromYosys(
   const idGen = { next: () => `gen_c${compCounter++}` };
 
   // 1. Process Module Input Ports (Drivers)
-  for (const [portName, port] of Object.entries(module.ports ?? {})) {
+  for (const [rawPortName, port] of Object.entries(module.ports ?? {})) {
     if (port.direction !== "input") continue;
+    const portName = sanitizeId(rawPortName);
 
     const width = port.bits.length;
     const size = resolveSize(width);
@@ -690,7 +697,7 @@ export function buildNetlistFromYosys(
       // Old logic for 1-bit
       const bit = port.bits[0];
       const bitInfo = normalizeBit(bit, counter);
-      const componentId = `in:${portName}`;
+      const componentId = `in_${portName}`;
       const instance = instantiate(INPUT_1, componentId);
       instance.metadata = {
         label: portName,
@@ -701,7 +708,7 @@ export function buildNetlistFromYosys(
       registerSource(nets, bitInfo.id, { componentId, portId: "out" });
     } else {
       // Multi-bit
-      const componentId = `in:${portName}`;
+      const componentId = `in_${portName}`;
       const tplId = `INPUT_${size}`;
       const instance = instantiate(getTemplate(tplId), componentId);
       instance.metadata = { label: portName };
@@ -716,7 +723,8 @@ export function buildNetlistFromYosys(
   }
 
   // 2. Process Cells (Logic)
-  for (const [cellName, cell] of Object.entries(module.cells ?? {})) {
+  for (const [rawCellName, cell] of Object.entries(module.cells ?? {})) {
+    const cellName = sanitizeId(rawCellName);
     // Standard D-Flip-Flop ($dff)
     if (cell.type === "$dff") {
       const width = parseParamInt(cell.parameters?.WIDTH);
@@ -2403,10 +2411,9 @@ export function buildNetlistFromYosys(
 
       // Handle Arithmetic Right Shift ($sshr) specially
       if (cell.type === "$sshr") {
-        // Logic: Y = (A >> B) | (Sign ? ~(~0 >> B) : 0)
-        // 1. Logical Shift A >> B
-        const shrId = `${instanceId}_shr`;
-        const shrInst = instantiate(getTemplate(`SHR_${size}`), shrId);
+        // Use native ASHR component
+        const shrId = `${instanceId}_ashr`;
+        const shrInst = instantiate(getTemplate(`ASHR_${size}`), shrId);
         components.push(shrInst);
         
         shrInst.connections["A"] = aPacked;
@@ -2414,110 +2421,12 @@ export function buildNetlistFromYosys(
         shrInst.connections["shift"] = bPacked;
         registerSink(nets, bPacked, { componentId: shrId, portId: "shift" });
         
-        const logicOut = `${shrId}_out`;
-        shrInst.connections["out"] = logicOut;
-        registerSource(nets, logicOut, { componentId: shrId, portId: "out" });
-
-        // 2. Generate Mask Base: AllOnes >> B
-        const allOnesId = `${instanceId}_ones`;
-        const allOnesInst = instantiate(getTemplate(`CONST_${size}`), allOnesId);
-        allOnesInst.metadata = { setting1: (1n << BigInt(size)) - 1n }; // All 1s
-        components.push(allOnesInst);
-        
-        const allOnesWire = `${allOnesId}_val`;
-        allOnesInst.connections["out"] = allOnesWire;
-        registerSource(nets, allOnesWire, { componentId: allOnesId, portId: "out" });
-
-        const maskShrId = `${instanceId}_mask_shr`;
-        const maskShr = instantiate(getTemplate(`SHR_${size}`), maskShrId);
-        components.push(maskShr);
-        
-        maskShr.connections["A"] = allOnesWire;
-        registerSink(nets, allOnesWire, { componentId: maskShrId, portId: "A" });
-        maskShr.connections["shift"] = bPacked; // Same shift amount
-        registerSink(nets, bPacked, { componentId: maskShrId, portId: "shift" });
-        
-        const maskBase = `${maskShrId}_out`;
-        maskShr.connections["out"] = maskBase;
-        registerSource(nets, maskBase, { componentId: maskShrId, portId: "out" });
-
-        // 3. Invert Mask Base -> Mask = ~(~0 >> B)
-        const notMaskId = `${instanceId}_mask_not`;
-        const notMask = instantiate(getTemplate(`NOT_${size}`), notMaskId);
-        components.push(notMask);
-        
-        notMask.connections["A"] = maskBase;
-        registerSink(nets, maskBase, { componentId: notMaskId, portId: "A" });
-        
-        const maskWire = `${notMaskId}_out`;
-        notMask.connections["Y"] = maskWire;
-        registerSource(nets, maskWire, { componentId: notMaskId, portId: "Y" });
-
-        // 4. Select Extension based on Sign Bit
-        // Sign Bit is the MSB of A.
-        // We need to extract it. Since we don't have a clear "GetBit" component yet for arbitrary net,
-        // we rely on the fact that we have 'aBits' array which contains the bit IDs.
-        // However, 'aBits' might be shorter than 'size'. We need to be careful.
-        // normalizeBit/packBits logic: aBits is raw from Yosys.
-        let signBitId: string;
-        if (aBits.length > 0) {
-            // Yosys usually provides bits up to wire width.
-            // If A is signed, the last bit in the list is the sign bit (MSB).
-            signBitId = aBits[aBits.length - 1].id;
-        } else {
-            // Fallback for empty/zero constant? Unlikely for valid Sshr.
-            signBitId = normalizeBit(0, counter).id; 
-        }
-        
-        // Ensure driver if it's a constant 0/1
-        ensureDriverIfConstant(
-            { id: signBitId, constant: aBits[aBits.length-1]?.constant }, 
-            instanceId, "Sign", components, nets
-        );
-
-        // Mux: If Sign=1, use Mask. If Sign=0, use 0.
-        // We can use MUX_size. A(0)=0/Const0, B(1)=Mask, S=Sign.
-        const muxId = `${instanceId}_sign_mux`;
-        const muxInst = instantiate(getTemplate(`MUX_${size}`), muxId);
-        components.push(muxInst);
-        
-        // Input A (False/0 case) -> Const 0
-        const zeroId = `${instanceId}_zero`;
-        const zeroInst = instantiate(getTemplate(`CONST_${size}`), zeroId); // Value 0 default
-        components.push(zeroInst);
-        const zeroWire = `${zeroId}_out`;
-        zeroInst.connections["out"] = zeroWire;
-        registerSource(nets, zeroWire, { componentId: zeroId, portId: "out" });
-
-        muxInst.connections["A"] = zeroWire; 
-        registerSink(nets, zeroWire, { componentId: muxId, portId: "A" });
-        
-        muxInst.connections["B"] = maskWire;
-        registerSink(nets, maskWire, { componentId: muxId, portId: "B" });
-        
-        muxInst.connections["S"] = signBitId;
-        registerSink(nets, signBitId, { componentId: muxId, portId: "S" });
-        
-        const extWire = `${muxId}_out`;
-        muxInst.connections["Y"] = extWire;
-        registerSource(nets, extWire, { componentId: muxId, portId: "Y" });
-
-        // 5. Final OR: Main | Ext
-        const orId = `${instanceId}_final_or`;
-        const orInst = instantiate(getTemplate(`OR_${size}`), orId);
-        components.push(orInst);
-        
-        orInst.connections["A"] = logicOut;
-        registerSink(nets, logicOut, { componentId: orId, portId: "A" });
-        orInst.connections["B"] = extWire;
-        registerSink(nets, extWire, { componentId: orId, portId: "B" });
-
-        // Output to Y
-        const yRaw = ensureArray(cell.connections["Y"], "Y");
         const busOut = `${instanceId}_out`;
-        orInst.connections["Y"] = busOut;
-        registerSource(nets, busOut, { componentId: instanceId, portId: "Y" });
+        shrInst.connections["out"] = busOut;
+        registerSource(nets, busOut, { componentId: shrId, portId: "out" });
 
+         // Output to Y
+        const yRaw = ensureArray(cell.connections["Y"], "Y");
         unpackBits(
           busOut,
           yRaw.map((b) => normalizeBit(b, counter)),
@@ -2526,7 +2435,7 @@ export function buildNetlistFromYosys(
           nets,
           idGen
         );
-        
+
         continue;
       }
 
@@ -2729,6 +2638,7 @@ export function buildNetlistFromYosys(
           const notId = `${cellName}_not`;
           const notInst = instantiate(NOT_1, notId);
           components.push(notInst);
+          notInst.connections.A = S.id;
           registerSink(nets, S.id, { componentId: notId, portId: "A" });
           registerSource(nets, nS_wire, { componentId: notId, portId: "Y" });
           notInstCreated = true;
@@ -2749,6 +2659,8 @@ export function buildNetlistFromYosys(
           const and1Id = `${cellName}_and1`;
           const and1Inst = instantiate(AND_1, and1Id);
           components.push(and1Inst);
+          and1Inst.connections.A = A.id;
+          and1Inst.connections.B = nS_wire;
           registerSink(nets, A.id, { componentId: and1Id, portId: "A" });
           registerSink(nets, nS_wire, { componentId: and1Id, portId: "B" });
           term1_wire = `$mux_t1_${cellName}`;
@@ -2772,6 +2684,8 @@ export function buildNetlistFromYosys(
           const and2Id = `${cellName}_and2`;
           const and2Inst = instantiate(AND_1, and2Id);
           components.push(and2Inst);
+          and2Inst.connections.A = B.id;
+          and2Inst.connections.B = S.id;
           registerSink(nets, B.id, { componentId: and2Id, portId: "A" });
           registerSink(nets, S.id, { componentId: and2Id, portId: "B" });
           term2_wire = `$mux_t2_${cellName}`;
@@ -2792,6 +2706,8 @@ export function buildNetlistFromYosys(
         const orId = `${cellName}_or`;
         const orInst = instantiate(OR_1, orId);
         components.push(orInst);
+        orInst.connections.A = term1_wire;
+        orInst.connections.B = term2_wire;
         registerSink(nets, term1_wire, { componentId: orId, portId: "A" });
         registerSink(nets, term2_wire, { componentId: orId, portId: "B" });
         registerSource(nets, Y.id, { componentId: orId, portId: "Y" });
@@ -2962,7 +2878,7 @@ export function buildNetlistFromYosys(
 
     const width = port.bits.length;
     const size = resolveSize(width);
-    const componentId = `out:${portName}`;
+    const componentId = `out_${portName}`;
 
     if (size === 1) {
       const bit = port.bits[0];
@@ -2996,7 +2912,7 @@ export function buildNetlistFromYosys(
   // Remove redundant splitters/makers
   components = optimizeMakerSplitterPairs(components, nets);
   components = cleanupRedundantComponents(components, nets);
-
+  
   // Verify nets all have driver
   for (const [netId, net] of nets) {
     if (!net.source) {

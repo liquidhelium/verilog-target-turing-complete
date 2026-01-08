@@ -183,7 +183,8 @@ function makePorts(
   inputs: string[],
   output: string | null,
   size: number,
-  outputX: number = 2
+  outputX: number = 2,
+  outputY: number = 0
 ): ComponentPort[] {
   const ports: ComponentPort[] = [];
   // Reverted input spacing change per user instruction "input is correct"
@@ -198,7 +199,7 @@ function makePorts(
     });
   });
   if (output) {
-    ports.push({ id: output, direction: "out", position: { x: outputX, y: 0 } });
+    ports.push({ id: output, direction: "out", position: { x: outputX, y: outputY } });
   }
   return ports;
 }
@@ -259,6 +260,22 @@ SIZES.forEach((size) => {
   ));
 });
 
+// Math Components
+const SHIFTS = {
+    SHR: { 8: ComponentKind.Shr8, 16: ComponentKind.Shr16, 32: ComponentKind.Shr32, 64: ComponentKind.Shr64 },
+    SHL: { 8: ComponentKind.Shl8, 16: ComponentKind.Shl16, 32: ComponentKind.Shl32, 64: ComponentKind.Shl64 },
+    ASHR: { 8: ComponentKind.Ashr8, 16: ComponentKind.Ashr16, 32: ComponentKind.Ashr32, 64: ComponentKind.Ashr64 },
+  };
+
+SIZES.forEach((size) => {
+    // @ts-ignore
+    register(template(`SHR_${size}`, `Shr${size}`, SHIFTS.SHR[size], makePorts(["A", "shift"], "out", size, 1, -1)));
+    // @ts-ignore
+    register(template(`SHL_${size}`, `Shl${size}`, SHIFTS.SHL[size], makePorts(["A", "shift"], "out", size, 1, -1)));
+    // @ts-ignore
+    register(template(`ASHR_${size}`, `Ashr${size}`, SHIFTS.ASHR[size], makePorts(["A", "shift"], "out", size, 1, -1)));
+});
+  
 // Splitters and Makers
 const SPLITMAKERS = {
   MAKER: { 8: ComponentKind.Maker8, 16: ComponentKind.Maker16, 32: ComponentKind.Maker32, 64: ComponentKind.Maker64 },
@@ -420,18 +437,12 @@ SIZES.forEach((size) => {
   // @ts-ignore
   register(template(`MUL_${size}`, `Mul${size}`, MATH.MUL[size], makePorts(["A", "B"], "pro", size, 1)));
   // @ts-ignore
-  register(template(`SHL_${size}`, `Shl${size}`, MATH.SHL[size], makePorts(["A", "shift"], "out", size, 1)));
+  register(template(`SHL_${size}`, `Shl${size}`, MATH.SHL[size], makePorts(["A", "shift"], "out", size, 1, -1)));
   // @ts-ignore
-  register(template(`SHR_${size}`, `Shr${size}`, MATH.SHR[size], makePorts(["A", "shift"], "out", size, 1)));
+  register(template(`SHR_${size}`, `Shr${size}`, MATH.SHR[size], makePorts(["A", "shift"], "out", size, 1, -1)));
   // @ts-ignore
   register(template(`NEG_${size}`, `Neg${size}`, MATH.NEG[size], makePorts(["A"], "out", size, 1)));
   // DivMod has 2 outputs.
-  /*
-  // @ts-ignore
-  register(template(`DIVMOD_${size}`, `DivMod${size}`, MATH.DIVMOD[size], [
-       // ... inputs A, B. outputs Div, Mod
-  ]));
-  */
 });
 
 // Comparisons
