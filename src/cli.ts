@@ -51,15 +51,18 @@ async function main(): Promise<void> {
     // Auto-generate IDs for modules that don't have one, excluding the top module
     const topModuleName = top || modules[0]?.name; 
     
-    // Helper to hash string to bigint (64-bit FNV-1a-like)
+    // Helper to hash string to bigint (63-bit FNV-1a-like)
+    // We use 63-bit to ensure the ID is interpreted as a positive number by Godot's signed 64-bit integers.
+    // If we used 64-bit, the MSB might be interpreted as a sign bit, causing a mismatch between 
+    // the folder name (JS BigInt.toString() is unsigned) and the in-game ID (signed).
     const hashStringId = (str: string): bigint => {
         let hash = 0xcbf29ce484222325n;
         for (let i = 0; i < str.length; i++) {
             hash ^= BigInt(str.charCodeAt(i));
             hash *= 0x100000001b3n;
-            hash &= 0xffffffffffffffffn; // Truncate to 64-bit
+            hash &= 0xffffffffffffffffn; 
         }
-        return hash;
+        return hash & 0x7fffffffffffffffn;
     };
 
     const deps = modules
