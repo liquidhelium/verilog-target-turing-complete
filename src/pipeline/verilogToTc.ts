@@ -60,6 +60,9 @@ export interface ConvertOptions {
   description?: string;
   debug?: boolean;
   compact?: boolean;
+  flatten?: boolean;
+  customComponentMapping?: Record<string, bigint>;
+  saveId?: bigint;
 }
 
 export interface ConvertResult {
@@ -83,7 +86,7 @@ const DIRECTIONS: TCPoint[] = [
   { x: 1, y: -1 },
 ];
 
-function buildYosysScript(sources: VerilogSources, topModule: string): string {
+function buildYosysScript(sources: VerilogSources, topModule: string, flatten: boolean = true): string {
   const readCmds = Object.keys(sources)
     .map((path) => `read_verilog ${path}`)
     .join("; ");
@@ -91,7 +94,7 @@ function buildYosysScript(sources: VerilogSources, topModule: string): string {
     readCmds,
     `hierarchy -check -top ${topModule}`,
     "proc",
-    "flatten",
+    flatten ? "flatten" : "",
     "opt",
     "clean",
     "write_json out.json",
@@ -102,7 +105,7 @@ function buildYosysScript(sources: VerilogSources, topModule: string): string {
 
 async function runSynthesis(sources: VerilogSources, options: ConvertOptions): Promise<any> {
   const backend = new DefaultYosysBackend();
-  const script = buildYosysScript(sources, options.topModule);
+  const script = buildYosysScript(sources, options.topModule, options.flatten !== false);
   const result = await backend.run({ script, files: sources });
   const out = result.files["out.json"];
   if (!out) {
@@ -434,6 +437,7 @@ function createPayload(
   layout: LayoutResult,
   netlist: NetlistGraph,
   description?: string,
+  saveId: bigint = 0n,
   compact: boolean = false,
 ): TCSavePayload {
   const components = toTcComponents(layout, netlist);
@@ -484,6 +488,7 @@ function createPayload(
     description: description ?? "Generated from Verilog",
     components,
     wires,
+    saveId,
     dependencies,
   });
   return payload;
@@ -640,7 +645,10 @@ export async function convertVerilogToSave(
   options: ConvertOptions,
 ): Promise<ConvertResult> {
   const yosysJson = await runSynthesis(sources, options);
-  const netlist = buildNetlistFromYosys(yosysJson, { topModule: options.topModule });
+  const netlist = buildNetlistFromYosys(yosysJson, { 
+    topModule: options.topModule, 
+    customComponentMapping: options.customComponentMapping 
+  });
   optimizeNetlist(netlist);
   const layoutGraph = buildLayoutGraph(netlist);
   const router = new ElkRouter({ gridSize: GRID_SIZE, compact: options.compact });
@@ -651,8 +659,7 @@ export async function convertVerilogToSave(
   }
 
   centerLayout(layout);
-
-  const payload = createPayload(layout, netlist, options.description, options.compact);
+  const payload = createPayload(layout, netlist, options.description, options.saveId, options.compact);
   const writer = new TCSaveWriter(payload);
   const { saveFile, uncompressed } = await writer.build();
   return { 

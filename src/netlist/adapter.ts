@@ -848,6 +848,11 @@ function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_]/g, "_");
 }
 
+export interface YosysAdapterOptions {
+  topModule: string;
+  customComponentMapping?: Record<string, bigint>;
+}
+
 export function buildNetlistFromYosys(
   json: unknown,
   options: YosysAdapterOptions
@@ -3038,11 +3043,12 @@ export function buildNetlistFromYosys(
     const binding = CELL_LIBRARY[cell.type];
     
     // Dynamic Custom Component Detection
-    if (!binding && cell.parameters?.CUSTOM_ID) {
-        let customIdVal: bigint | undefined;
+    // Either explicit CUSTOM_ID parameter OR mapped via options
+    let customIdVal: bigint | undefined;
+    if (cell.parameters?.CUSTOM_ID) {
         const val = cell.parameters.CUSTOM_ID;
         if (typeof val === "string") {
-            if (/^[01]+$/.test(val) && val.length > 20) { // Simple heuristic for binary strings vs decimal
+            if (/^[01]+$/.test(val) && val.length > 20) { // Simple heuristic
                  customIdVal = BigInt("0b" + val);
             } else {
                  customIdVal = BigInt(val);
@@ -3050,8 +3056,11 @@ export function buildNetlistFromYosys(
         } else if (typeof val === "number") {
             customIdVal = BigInt(val);
         }
+    } else if (options.customComponentMapping && options.customComponentMapping[cell.type]) {
+        customIdVal = options.customComponentMapping[cell.type];
+    }
 
-        if (customIdVal !== undefined) {
+    if (!binding && customIdVal !== undefined) {
              const ports: ComponentPort[] = [];
              let inputCount = 0;
              let outputCount = 0;
@@ -3114,25 +3123,17 @@ export function buildNetlistFromYosys(
                  }
              }
              continue;
-        }
     }
 
     if (!binding) {
       throw new Error(`Unsupported cell type ${cell.type}`);
     }
 
-    let customIdVal: bigint | undefined;
-    if (binding.template === CUSTOM_GENERIC) {
-        const val = cell.parameters?.CUSTOM_ID;
-        if (typeof val === "string") {
-            if (/^[01]+$/.test(val)) {
-                customIdVal = BigInt("0b" + val);
-            } else {
-                customIdVal = BigInt(val);
-            }
-        } else if (typeof val === "number") {
-            customIdVal = BigInt(val);
-        }
+    if (binding.template === CUSTOM_GENERIC && customIdVal === undefined) {
+        // Fallback or explicit parameter check again if needed (usually handled above)
+        // But CUSTOM_GENERIC assumes we want a generic custom block.
+        // If CELL_LIBRARY maps it to CUSTOM_GENERIC but we didn't get an ID, we assume 0 or handle error?
+        // Usually CELL_LIBRARY doesn't map arbitrary things to CUSTOM_GENERIC unless intended.
     }
 
     // Determine width from first output port (or Input if no output?)

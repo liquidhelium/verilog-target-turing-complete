@@ -1,6 +1,4 @@
-module tc_custom_8_8 #(
-    parameter CUSTOM_ID = 64'd12345
-) (
+module tc_custom_8_8  (
     input [7:0] in,
     output [7:0] out
 );
@@ -8,7 +6,7 @@ module tc_custom_8_8 #(
 endmodule
 
 module test_custom(input [7:0] A, output [7:0] B);
-    tc_custom_8_8 #(.CUSTOM_ID(64'd12345)) c1 (
+    tc_custom_8_8 c1 (
         .in(A),
         .out(B)
     );
