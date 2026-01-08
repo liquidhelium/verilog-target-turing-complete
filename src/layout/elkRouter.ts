@@ -70,31 +70,65 @@ export class ElkRouter {
 
     nodes.sort((a, b) => (a as any)._rawX - (b as any)._rawX);
 
+    // Calculate total area and target side length for a square approximation
+    const GAP = 1;
+    let totalArea = 0;
+    let maxNodeHeight = 0;
+    for (const node of nodes) {
+      // Area including gap spacing overhead
+      const w = node.width + GAP;
+      const h = node.height + GAP;
+      totalArea += w * h;
+      maxNodeHeight = Math.max(maxNodeHeight, h);
+    }
+    
+    // Determine target height. 
+    // Usually H = Sqrt(Area). We ensure it's at least as tall as the tallest component.
+    const targetHeight = Math.max(Math.ceil(Math.sqrt(totalArea)), maxNodeHeight);
+
     const columns: LayoutNodePlacement[][] = [];
-    if (nodes.length > 0) {
-      let currentCol = [nodes[0]];
-      for (let i = 1; i < nodes.length; i++) {
-        const node = nodes[i];
-        const prev = nodes[i - 1];
-        if ((node as any)._rawX > (prev as any)._rawX + 5.0) {
+    let currentCol: LayoutNodePlacement[] = [];
+    let currentHeight = 0;
+    let maxColH = 0;
+
+    for (const node of nodes) {
+      if (currentCol.length > 0 && currentHeight + node.height + GAP > targetHeight) {
+          // If adding this node exceeds target height significantly 
+          // (check if just slightly over is ok? For now strict cut)
           columns.push(currentCol);
           currentCol = [];
-        }
-        currentCol.push(node);
+          currentHeight = 0;
       }
+      currentCol.push(node);
+      currentHeight += node.height + GAP;
+      maxColH = Math.max(maxColH, currentHeight);
+    }
+    
+    if (currentCol.length > 0) {
       columns.push(currentCol);
     }
 
-    const GAP = 1;
     let currentX = 0;
 
     for (const col of columns) {
-      col.sort((a, b) => a.position.y - b.position.y);
+      // Sort vertically? No, preserve ELK relative Y order?
+      // Actually sorting by _rawX already linearized them.
+      // Top to bottom in column corresponds to left-to-right in linearization.
+      // This is "Snake" or just wrapping.
+      
       let currentY = 0;
       let colWidth = 0;
       for (const node of col) {
         colWidth = Math.max(colWidth, node.width);
-        this.shiftNode(node, currentX, currentY);
+      }
+      
+      // Center vertically in square? or Center relative to row?
+      // Just start from 0. Offset will be handled by global centering.
+
+      for (const node of col) {
+        // Horizontally center in column
+        const offsetX = Math.floor((colWidth - node.width) / 2);
+        this.shiftNode(node, currentX + offsetX, currentY);
         currentY += node.height + GAP;
       }
       currentX += colWidth + GAP;
