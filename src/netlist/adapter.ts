@@ -2766,6 +2766,59 @@ export function buildNetlistFromYosys(
       continue;
     }
 
+    // Math: $shiftx (Shift Extended)
+    if (cell.type === "$shiftx") {
+      const aWidth = parseParamInt(cell.parameters?.A_WIDTH);
+      // We resolve size based on A_WIDTH
+      const size = resolveSize(aWidth);
+      const instanceId = cellName;
+
+      // Pack A (Data input)
+      const aBits = ensureArray(cell.connections["A"], "A").map((b) =>
+        normalizeBit(b, counter)
+      );
+      const aPacked = packBits(aBits, size, components, nets, idGen);
+
+      // Pack B (Shift amount/index)
+      // Pad B with zeros to match 'size' as TC shifters expect full width shift input
+      const bBits = ensureArray(cell.connections["B"], "B").map((b) =>
+        normalizeBit(b, counter)
+      );
+      // Only pad if we have fewer bits than size.
+      // If we have more (unlikely for index), packBits might drop or we might need to truncate,
+      // but standard packBits usage handles matching size usually.
+      while (bBits.length < size) {
+        bBits.push(normalizeBit("0", counter));
+      }
+      const bPacked = packBits(bBits, size, components, nets, idGen);
+
+      // Instantiate SHR (Shift Right)
+      const templateId = `SHR_${size}`;
+      const inst = instantiate(getTemplate(templateId), instanceId);
+      components.push(inst);
+
+      inst.connections["A"] = aPacked;
+      inst.connections["shift"] = bPacked;
+      registerSink(nets, aPacked, { componentId: instanceId, portId: "A" });
+      registerSink(nets, bPacked, { componentId: instanceId, portId: "shift" });
+
+      // Output Y
+      const yRaw = ensureArray(cell.connections["Y"], "Y");
+      const busOut = `${instanceId}_out`;
+      inst.connections["out"] = busOut;
+      registerSource(nets, busOut, { componentId: instanceId, portId: "out" });
+
+      unpackBits(
+        busOut,
+        yRaw.map((b) => normalizeBit(b, counter)),
+        size,
+        components,
+        nets,
+        idGen
+      );
+      continue;
+    }
+
     // Math: $shl, $sshl, $shr, $sshr
     if (
       cell.type === "$shl" ||
