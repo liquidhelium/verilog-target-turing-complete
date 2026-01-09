@@ -5,6 +5,7 @@ import { runCli } from "../src/cli.js";
 interface Benchmark {
   name: string;
   verilog: string;
+  filename: string;
   top: string;
   category: string;
   compact: boolean;
@@ -19,7 +20,7 @@ async function loadBenchmarks(): Promise<Benchmark[]> {
   try {
     const files = await fs.readdir(dir);
     for (const file of files) {
-      if (!file.endsWith(".v")) continue;
+      if (!file.endsWith(".v") && !file.endsWith(".sv")) continue;
       const name = parse(file).name;
       const content = await fs.readFile(join(dir, file), "utf-8");
 
@@ -43,6 +44,7 @@ async function loadBenchmarks(): Promise<Benchmark[]> {
       benchmarks.push({
         name,
         verilog: content,
+        filename: file,
         top,
         category,
         compact,
@@ -92,7 +94,7 @@ async function main() {
     // Let's assume we can reconstruct path or pass it.
     // Actually, passing content to CLI is not supported. CLI reads file.
     // We can just call CLI with the path.
-    const benchPath = join("scripts/benchmarks", `${bench.name}.v`);
+    const benchPath = join("scripts/benchmarks", bench.filename);
     
     console.log(`Processing ${bench.name}...`);
     try {

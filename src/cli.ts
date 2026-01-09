@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { resolve, dirname, basename, join } from "node:path";
+import { resolve, dirname, basename, join, extname } from "node:path";
 import { convertVerilogToSave } from "./pipeline/verilogToTc.js";
 import { parseModules } from "./utils/verilogUtils.js";
 import { CustomComponentMeta } from "./netlist/types.js";
@@ -133,8 +133,11 @@ export async function runCli(args: string[]): Promise<void> {
         
         console.log(`Building Dependency: ${dep.name}`);
         
+        const isSv = extname(inputPath).toLowerCase() === ".sv";
+        const depFilename = isSv ? "dep.sv" : "dep.v";
+
         const depResult = await convertVerilogToSave(
-          { "dep.v": dep.body },
+          { [depFilename]: dep.body },
           { 
             topModule: dep.name, 
             description: `Submodule: ${dep.name}`,

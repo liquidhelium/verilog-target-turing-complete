@@ -571,22 +571,41 @@ function packBits(
   }
 
   // 3. Standard Maker (<= 8)
+  // TC only has MAKER_8. Any smaller accumulation should use MAKER_8 and ignore upper bits.
+  // Actually, TC doesn't have MAKER_3, MAKER_4, etc. It only has MAKER_8 (and MAKER_16/32/64 which are hierarchical).
+  // For size < 8, we must use MAKER_8 and pad with zeros.
+  // The output of MAKER_8 is an 8-bit bus. We need to present this as the requested size.
+  // However, `packBits` returns a ID. The consumer dictates the size implicitly by connecting it to something.
+  // But wait, if we return an 8-bit bus ID, and connect it to a 3-bit port, TC might be confused or it might just work (truncation).
+  // Safest bet: Use MAKER_8, and assume truncation if connected to smaller port, OR rely on bitwise logic if needed.
+  // Since we are inside `packBits` with `targetSize`, let's check if we can simply upgrade to MAKER_8.
+
+  let actualTemplateId = `MAKER_${targetSize}`;
+  let actualSize = targetSize;
+  
+  // Upgrade to MAKER_8 if targetSize is not standard (1, 8, 16, 32, 64)
+  // Note: 1 is handled at top. Hierarchical handles > 8. So this is for 2..7.
+  if (targetSize < 8) {
+      actualTemplateId = "MAKER_8";
+      actualSize = 8;
+  }
+
   const makerId = idGen.next();
-  const makerTemplateId = `MAKER_${targetSize}`;
-  const makerDesc = getTemplate(makerTemplateId);
+  const makerDesc = getTemplate(actualTemplateId);
   const maker = instantiate(makerDesc, makerId);
   components.push(maker);
 
   // Connect bits
-  for (let i = 0; i < targetSize; i++) {
+  for (let i = 0; i < actualSize; i++) {
     let bitId: string;
     if (i < bits.length) {
       bitId = bits[i].id;
       ensureDriverIfConstant(bits[i], makerId, `in${i}`, components, nets);
     } else {
+      // Pad with Zeros
       bitId = `__pad_0_${makerId}_${i}`;
       const constId = `${makerId}_pad_${i}`;
-      const constInst = instantiate(CONST_0, constId);
+      const constInst = instantiate(getTemplate("CONST_0"), constId);
       components.push(constInst);
       constInst.connections["out"] = bitId;
       registerSource(nets, bitId, { componentId: constId, portId: "out" });
@@ -595,6 +614,7 @@ function packBits(
     maker.connections[`in${i}`] = bitId;
     registerSink(nets, bitId, { componentId: makerId, portId: `in${i}` });
   }
+
 
   // Output bus
   const busId = `${makerId}_bus`;
@@ -1385,6 +1405,305 @@ export function buildNetlistFromYosys(
         idGen
       );
 
+      continue;
+    }
+
+    // D-Flip-Flop with Enable and Async Reset ($adffe)
+    if (cell.type === "$adffe") {
+      const width = parseParamInt(cell.parameters?.WIDTH);
+      const size = resolveSize(width);
+      const clkPol = parseParamInt(cell.parameters?.CLK_POLARITY);
+      const enPol = parseParamInt(cell.parameters?.EN_POLARITY);
+      const arstPol = parseParamInt(cell.parameters?.ARST_POLARITY);
+      const arstVal = BigInt(
+        "0b" + ((cell.parameters?.ARST_VALUE as any) ?? "0")
+      );
+
+      const instanceId = cellName;
+
+      // 1. CLK
+      let clkWire = normalizeBit(
+        ensureArray(cell.connections["CLK"], "CLK", 1)[0],
+        counter
+      ).id;
+      if (clkPol === 0) {
+        // Invert Clock
+        const notId = `${instanceId}_clk_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = clkWire;
+        registerSink(nets, clkWire, { componentId: notId, portId: "A" });
+
+        const clkInv = `${instanceId}_clk_inv`;
+        notInst.connections["Y"] = clkInv;
+        registerSource(nets, clkInv, { componentId: notId, portId: "Y" });
+        clkWire = clkInv;
+      }
+
+      // 2. Enable (EN)
+      let enWire = normalizeBit(
+        ensureArray(cell.connections["EN"], "EN", 1)[0],
+        counter
+      ).id;
+      if (enPol === 0) {
+        // Invert Enable
+        const enNotId = `${instanceId}_en_not`;
+        const enNotInst = instantiate(getTemplate("NOT_1"), enNotId);
+        components.push(enNotInst);
+        enNotInst.connections["A"] = enWire;
+        registerSink(nets, enWire, { componentId: enNotId, portId: "A" });
+
+        const enInv = `${instanceId}_en_inv`;
+        enNotInst.connections["Y"] = enInv;
+        registerSource(nets, enInv, { componentId: enNotId, portId: "Y" });
+        enWire = enInv;
+      }
+
+      // 3. ARST Processing
+      let arstWire = normalizeBit(
+        ensureArray(cell.connections["ARST"], "ARST", 1)[0],
+        counter
+      ).id;
+      if (arstPol === 0) {
+        // Invert ARST
+        const notId = `${instanceId}_arst_not`;
+        const notInst = instantiate(getTemplate("NOT_1"), notId);
+        components.push(notInst);
+        notInst.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: notId, portId: "A" });
+
+        const arstInv = `${instanceId}_arst_inv`;
+        notInst.connections["Y"] = arstInv;
+        registerSource(nets, arstInv, { componentId: notId, portId: "Y" });
+        arstWire = arstInv;
+      }
+
+      // 4. Register
+      const regId = `${instanceId}_reg`;
+      const regTemplate = getTemplate(`REG_${size}`);
+      const regInst = instantiate(regTemplate, regId);
+      components.push(regInst);
+
+      // Save (CLK)
+      regInst.connections["save"] = clkWire;
+      registerSink(nets, clkWire, { componentId: regId, portId: "save" });
+
+      // Load (Tie to 1) - Only for registers > 1 bit
+      if (size > 1) {
+        const loadConstId = `${instanceId}_load_const`;
+        const loadInst = instantiate(getTemplate("CONST_1"), loadConstId);
+        components.push(loadInst);
+        const loadWire = `${loadConstId}_out`;
+        loadInst.connections["out"] = loadWire;
+        registerSource(nets, loadWire, {
+          componentId: loadConstId,
+          portId: "out",
+        });
+
+        regInst.connections["load"] = loadWire;
+        registerSink(nets, loadWire, { componentId: regId, portId: "load" });
+      }
+
+      const regOut = `${instanceId}_reg_out`;
+      regInst.connections["out"] = regOut;
+      registerSource(nets, regOut, { componentId: regId, portId: "out" });
+
+      // 5. Data Processing (Mux Cascade)
+      // Final Val = MUX(ARST, MUX(EN, D, Q), ARST_VAL)
+
+      const dRaw = ensureArray(cell.connections["D"], "D");
+      const dPacked = packBits(
+        dRaw.map((b) => normalizeBit(b, counter)),
+        size,
+        components,
+        nets,
+        idGen
+      );
+
+      // Create ARST Value Constant
+      let rstBusId: string;
+      if (size === 1) {
+        const val = Number(arstVal) & 1;
+        const constId = `${instanceId}_rst_val`;
+        const tplId = val === 1 ? "CONST_1" : "CONST_0";
+        const constInst = instantiate(getTemplate(tplId), constId);
+        components.push(constInst);
+        rstBusId = `${constId}_out`;
+        constInst.connections["out"] = rstBusId;
+        registerSource(nets, rstBusId, { componentId: constId, portId: "out" });
+      } else {
+        const constId = `${instanceId}_rst_val`;
+        const constTemplate = getTemplate(`CONST_${size}`);
+        const constInst = instantiate(constTemplate, constId);
+        if (!constInst.metadata) constInst.metadata = {};
+        constInst.metadata.setting1 = arstVal;
+        components.push(constInst);
+        rstBusId = `${instanceId}_rst_val_out`;
+        constInst.connections["out"] = rstBusId;
+        registerSource(nets, rstBusId, { componentId: constId, portId: "out" });
+      }
+
+      let muxOut: string;
+
+      if (size === 1) {
+        // --- 1-bit Mux Cascade ---
+        
+        // Mux 1 (Enable): Y_En = EN ? B(D) : A(Q)
+        // Y_En = (EN & D) | (~EN & Q)
+        
+        // Invert EN
+        const notEnId = `${instanceId}_mux_en_notEn`;
+        const notEn = instantiate(getTemplate("NOT_1"), notEnId);
+        components.push(notEn);
+        notEn.connections["A"] = enWire;
+        registerSink(nets, enWire, { componentId: notEnId, portId: "A" });
+        const notEnWire = `${notEnId}_out`;
+        notEn.connections["Y"] = notEnWire;
+        registerSource(nets, notEnWire, { componentId: notEnId, portId: "Y" });
+
+        // Term 1: ~EN & Q (Keep)
+        const and1Id = `${instanceId}_mux_en_term1`;
+        const and1 = instantiate(getTemplate("AND_1"), and1Id);
+        components.push(and1);
+        and1.connections["A"] = notEnWire;
+        registerSink(nets, notEnWire, { componentId: and1Id, portId: "A" });
+        and1.connections["B"] = regOut;
+        registerSink(nets, regOut, { componentId: and1Id, portId: "B" });
+        const term1Wire = `${and1Id}_out`;
+        and1.connections["Y"] = term1Wire;
+        registerSource(nets, term1Wire, { componentId: and1Id, portId: "Y" });
+
+        // Term 2: EN & D (New)
+        const and2Id = `${instanceId}_mux_en_term2`;
+        const and2 = instantiate(getTemplate("AND_1"), and2Id);
+        components.push(and2);
+        and2.connections["A"] = enWire;
+        registerSink(nets, enWire, { componentId: and2Id, portId: "A" });
+        and2.connections["B"] = dPacked;
+        registerSink(nets, dPacked, { componentId: and2Id, portId: "B" });
+        const term2Wire = `${and2Id}_out`;
+        and2.connections["Y"] = term2Wire;
+        registerSource(nets, term2Wire, { componentId: and2Id, portId: "Y" });
+
+        // MuxEn Out = Term1 | Term2
+        const or1Id = `${instanceId}_mux_en_or`;
+        const or1 = instantiate(getTemplate("OR_1"), or1Id);
+        components.push(or1);
+        or1.connections["A"] = term1Wire;
+        registerSink(nets, term1Wire, { componentId: or1Id, portId: "A" });
+        or1.connections["B"] = term2Wire;
+        registerSink(nets, term2Wire, { componentId: or1Id, portId: "B" });
+        const muxEnOut = `${or1Id}_out`;
+        or1.connections["Y"] = muxEnOut;
+        registerSource(nets, muxEnOut, { componentId: or1Id, portId: "Y" });
+
+
+        // Mux 2 (Reset): Final = ARST ? B(RstVal) : A(Y_En)
+        // Final = (ARST & RstVal) | (~ARST & Y_En)
+
+        // Invert ARST
+        const notArstId = `${instanceId}_mux_rst_notArst`;
+        const notArst = instantiate(getTemplate("NOT_1"), notArstId);
+        components.push(notArst);
+        notArst.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: notArstId, portId: "A" });
+        const notArstWire = `${notArstId}_out`;
+        notArst.connections["Y"] = notArstWire;
+        registerSource(nets, notArstWire, { componentId: notArstId, portId: "Y" });
+
+        // Term 3: ~ARST & Y_En
+        const and3Id = `${instanceId}_mux_rst_term1`;
+        const and3 = instantiate(getTemplate("AND_1"), and3Id);
+        components.push(and3);
+        and3.connections["A"] = notArstWire;
+        registerSink(nets, notArstWire, { componentId: and3Id, portId: "A" });
+        and3.connections["B"] = muxEnOut;
+        registerSink(nets, muxEnOut, { componentId: and3Id, portId: "B" });
+        const term3Wire = `${and3Id}_out`;
+        and3.connections["Y"] = term3Wire;
+        registerSource(nets, term3Wire, { componentId: and3Id, portId: "Y" });
+
+        // Term 4: ARST & RstVal
+        const and4Id = `${instanceId}_mux_rst_term2`;
+        const and4 = instantiate(getTemplate("AND_1"), and4Id);
+        components.push(and4);
+        and4.connections["A"] = arstWire;
+        registerSink(nets, arstWire, { componentId: and4Id, portId: "A" });
+        and4.connections["B"] = rstBusId;
+        registerSink(nets, rstBusId, { componentId: and4Id, portId: "B" });
+        const term4Wire = `${and4Id}_out`;
+        and4.connections["Y"] = term4Wire;
+        registerSource(nets, term4Wire, { componentId: and4Id, portId: "Y" });
+
+        // Final Out = Term3 | Term4
+        const or2Id = `${instanceId}_mux_rst_or`;
+        const or2 = instantiate(getTemplate("OR_1"), or2Id);
+        components.push(or2);
+        or2.connections["A"] = term3Wire;
+        registerSink(nets, term3Wire, { componentId: or2Id, portId: "A" });
+        or2.connections["B"] = term4Wire;
+        registerSink(nets, term4Wire, { componentId: or2Id, portId: "B" });
+        
+        muxOut = `${or2Id}_out`;
+        or2.connections["Y"] = muxOut;
+        registerSource(nets, muxOut, { componentId: or2Id, portId: "Y" });
+
+      } else {
+        // --- Multi-bit Standard Mux Logic ---
+
+        // Mux 1 (Enable): Y_En = EN ? D : Q
+        const muxEnId = `${instanceId}_mux_en`;
+        const muxEnTemplate = getTemplate(`MUX_${size}`);
+        const muxEn = instantiate(muxEnTemplate, muxEnId);
+        components.push(muxEn);
+
+        muxEn.connections["S"] = enWire; // Select = Enable
+        registerSink(nets, enWire, { componentId: muxEnId, portId: "S" });
+
+        muxEn.connections["B"] = dPacked; // B = New Data (when S=1)
+        registerSink(nets, dPacked, { componentId: muxEnId, portId: "B" });
+
+        muxEn.connections["A"] = regOut; // A = Old Value (when S=0)
+        registerSink(nets, regOut, { componentId: muxEnId, portId: "A" });
+
+        const muxEnOut = `${muxEnId}_out`;
+        muxEn.connections["Y"] = muxEnOut;
+        registerSource(nets, muxEnOut, { componentId: muxEnId, portId: "Y" });
+
+        // Mux 2 (Reset): Final = ARST ? RstVal : Y_En
+        const muxRstId = `${instanceId}_mux_rst`;
+        const muxRstTemplate = getTemplate(`MUX_${size}`);
+        const muxRst = instantiate(muxRstTemplate, muxRstId);
+        components.push(muxRst);
+
+        muxRst.connections["S"] = arstWire; // Select = Async Reset
+        registerSink(nets, arstWire, { componentId: muxRstId, portId: "S" });
+
+        muxRst.connections["B"] = rstBusId; // B = Reset Value (when S=1)
+        registerSink(nets, rstBusId, { componentId: muxRstId, portId: "B" });
+
+        muxRst.connections["A"] = muxEnOut; // A = MuxEn Out (when S=0)
+        registerSink(nets, muxEnOut, { componentId: muxRstId, portId: "A" });
+
+        muxOut = `${muxRstId}_out`;
+        muxRst.connections["Y"] = muxOut;
+        registerSource(nets, muxOut, { componentId: muxRstId, portId: "Y" });
+      }
+
+      regInst.connections["value"] = muxOut;
+      registerSink(nets, muxOut, { componentId: regId, portId: "value" });
+
+      // 6. Connect Output Q
+      const qRaw = ensureArray(cell.connections["Q"], "Q");
+      unpackBits(
+        regOut,
+        qRaw.map((b) => normalizeBit(b, counter)),
+        size,
+        components,
+        nets,
+        idGen
+      );
+      
       continue;
     }
 

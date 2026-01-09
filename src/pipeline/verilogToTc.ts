@@ -90,7 +90,7 @@ const DIRECTIONS: TCPoint[] = [
 
 function buildYosysScript(sources: VerilogSources, topModule: string, flatten: boolean = true): string {
   const readCmds = Object.keys(sources)
-    .map((path) => `read_verilog ${path}`)
+    .map((path) => path.endsWith('.sv') ? `read_verilog -sv ${path}` : `read_verilog ${path}`)
     .join("; ");
   return [
     readCmds,
